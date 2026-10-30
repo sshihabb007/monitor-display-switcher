@@ -1,0 +1,21 @@
+# Compiled binaries, generated icons, and build outputs (build via .\build.ps1)
+dist/
+bin/
+obj/
+assets/*.ico
+*.exe
+*.dll
+*.pdb
+*.ico
+
+# Portable runtime configuration & temporary files
+*.config.json
+*.tmp
+*.bak
+
+# OS & Editor metadata
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
