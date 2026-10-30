@@ -35,6 +35,7 @@ namespace DisplayInputSwitcher.UI
         private bool _isMuted;
         private bool _isSwitchingOrReading;
         private bool _settingsOpen;
+        private bool _aboutOpen;
         private bool _allowRealExit;
         private Task _initialLoadTask;
 
@@ -48,6 +49,9 @@ namespace DisplayInputSwitcher.UI
         private Border _pinButton;
         private TextBlock _pinGlyph;
         private Border _settingsButton;
+        private Border _aboutButton;
+        private Border _aboutBadgeCircle;
+        private TextBlock _aboutBadgeGlyph;
         private Border _liveBadgeBorder;
         private Ellipse _liveBadgeDot;
         private TextBlock _liveBadgeText;
@@ -113,6 +117,9 @@ namespace DisplayInputSwitcher.UI
         private FrameworkElement _startupToggle;
         private Action<bool> _setStartupVisual;
 
+        // About Developer Drawer
+        private Border _aboutDrawerContent;
+
         // Footer
         private TextBlock _statusFooterText;
 
@@ -156,6 +163,7 @@ namespace DisplayInputSwitcher.UI
             SystemEvents.PowerModeChanged += OnSystemPowerModeChanged;
 
             _trayManager.OpenWindowRequested += RestoreAndActivateWindow;
+            _trayManager.AboutRequested += OpenAboutDeveloperView;
             _trayManager.SwitchHdmiRequested += delegate { TriggerSwitchToInput(_activeMap.HdmiValue, _activeMap.HdmiLabel); };
             _trayManager.SwitchDpRequested += delegate { TriggerSwitchToInput(_activeMap.DpValue, _activeMap.DpLabel); };
             _trayManager.ToggleInputRequested += TriggerToggleInput;
@@ -229,6 +237,7 @@ namespace DisplayInputSwitcher.UI
             body.Children.Add(BuildQuickToggleButton());
             body.Children.Add(BuildQuickControlsSection());
             body.Children.Add(BuildSettingsSection());
+            body.Children.Add(BuildAboutDeveloperSection());
             body.Children.Add(BuildFooterBar());
 
             mainStack.Children.Add(body);
@@ -327,6 +336,7 @@ namespace DisplayInputSwitcher.UI
                 Task ignored = RefreshMonitorsAndLiveStateAsync(true);
             }, false);
             _settingsButton = CreateIconToolbarButton("⚙", "Monitor Codes, Presets & Hotkeys", out dummy, ToggleSettingsDrawer, false);
+            _aboutButton = CreateSmallAboutToolbarButton(ToggleAboutDrawer);
             Border minBtn = CreateIconToolbarButton("—", "Minimize", out dummy, delegate
             {
                 WindowState = WindowState.Minimized;
@@ -339,6 +349,7 @@ namespace DisplayInputSwitcher.UI
             right.Children.Add(_pinButton);
             right.Children.Add(refreshBtn);
             right.Children.Add(_settingsButton);
+            right.Children.Add(_aboutButton);
             right.Children.Add(minBtn);
             right.Children.Add(closeBtn);
 
@@ -351,11 +362,11 @@ namespace DisplayInputSwitcher.UI
         {
             Border b = new Border
             {
-                Width = 26,
-                Height = 26,
-                CornerRadius = new CornerRadius(7),
+                Width = 23,
+                Height = 24,
+                CornerRadius = new CornerRadius(6),
                 Background = Brushes.Transparent,
-                Margin = new Thickness(2, 0, 0, 0),
+                Margin = new Thickness(1, 0, 0, 0),
                 Cursor = Cursors.Hand,
                 ToolTip = tooltip
             };
@@ -363,7 +374,7 @@ namespace DisplayInputSwitcher.UI
             TextBlock t = new TextBlock
             {
                 Text = symbol,
-                FontSize = 11.5,
+                FontSize = 11,
                 Foreground = BrushFromHex("#94A3B8"),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center
@@ -384,6 +395,65 @@ namespace DisplayInputSwitcher.UI
                     b.Background = Brushes.Transparent;
                     t.Foreground = BrushFromHex("#94A3B8");
                 }
+            };
+            b.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
+            {
+                e.Handled = true;
+                if (onClick != null) onClick();
+            };
+
+            return b;
+        }
+
+        private Border CreateSmallAboutToolbarButton(Action onClick)
+        {
+            Border b = new Border
+            {
+                Width = 22,
+                Height = 24,
+                CornerRadius = new CornerRadius(6),
+                Background = Brushes.Transparent,
+                Margin = new Thickness(1, 0, 0, 0),
+                Cursor = Cursors.Hand,
+                ToolTip = "About Monitor Display Switcher & Developer (Mehedi Hasan Shihab)"
+            };
+
+            _aboutBadgeCircle = new Border
+            {
+                Width = 13.5,
+                Height = 13.5,
+                CornerRadius = new CornerRadius(7),
+                BorderThickness = new Thickness(1.15),
+                BorderBrush = BrushFromHex("#94A3B8"),
+                Background = Brushes.Transparent,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            _aboutBadgeGlyph = new TextBlock
+            {
+                Text = "i",
+                FontFamily = new FontFamily("Georgia"),
+                FontWeight = FontWeights.Bold,
+                FontStyle = FontStyles.Italic,
+                FontSize = 8.6,
+                Foreground = BrushFromHex("#94A3B8"),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, -0.5, 0, 0)
+            };
+            _aboutBadgeCircle.Child = _aboutBadgeGlyph;
+            b.Child = _aboutBadgeCircle;
+
+            b.MouseEnter += delegate
+            {
+                b.Background = BrushFromHex("#1E293B");
+                _aboutBadgeCircle.BorderBrush = BrushFromHex("#38BDF8");
+                _aboutBadgeGlyph.Foreground = Brushes.White;
+            };
+            b.MouseLeave += delegate
+            {
+                UpdateToolbarHighlights();
             };
             b.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
             {
@@ -1169,6 +1239,211 @@ namespace DisplayInputSwitcher.UI
             return _settingsDrawerContent;
         }
 
+        private UIElement BuildAboutDeveloperSection()
+        {
+            _aboutDrawerContent = new Border
+            {
+                CornerRadius = new CornerRadius(11),
+                Background = BrushFromHex("#111A2E"),
+                BorderBrush = BrushFromHex("#2E3E5C"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(12, 11, 12, 11),
+                Margin = new Thickness(0, 0, 0, 8),
+                Visibility = Visibility.Collapsed
+            };
+
+            StackPanel sp = new StackPanel();
+
+            // Software Hero Header Row
+            Grid appRow = new Grid { Margin = new Thickness(0, 0, 0, 9) };
+            appRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            appRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            Border heroLogo = new Border
+            {
+                Width = 36,
+                Height = 36,
+                CornerRadius = new CornerRadius(9),
+                Background = new LinearGradientBrush(ColorFromHex("#0E7490"), ColorFromHex("#7C5CFF"), 45.0),
+                Margin = new Thickness(0, 0, 10, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Path heroGlyph = new Path
+            {
+                Data = Geometry.Parse("M 4,6 L 20,6 L 20,16 L 4,16 Z M 9,19 L 15,19 M 12,16 L 12,19"),
+                Stroke = Brushes.White,
+                StrokeThickness = 1.7,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            heroLogo.Child = heroGlyph;
+            Grid.SetColumn(heroLogo, 0);
+            appRow.Children.Add(heroLogo);
+
+            StackPanel appMeta = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            appMeta.Children.Add(new TextBlock
+            {
+                Text = "Monitor Display Switcher v1.2.0",
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                FontSize = 12.2,
+                Foreground = BrushFromHex("#F8FAFC")
+            });
+            appMeta.Children.Add(new TextBlock
+            {
+                Text = "Universal DDC/CI HDMI, DP & USB-C Switcher • AnyCPU",
+                FontSize = 9.8,
+                Foreground = BrushFromHex("#94A3B8"),
+                Margin = new Thickness(0, 1, 0, 0)
+            });
+            Grid.SetColumn(appMeta, 1);
+            appRow.Children.Add(appMeta);
+            sp.Children.Add(appRow);
+
+            // Inner Developer Card matching MHS Download Manager About Info
+            Border devCard = new Border
+            {
+                CornerRadius = new CornerRadius(9),
+                Background = BrushFromHex("#0D1425"),
+                BorderBrush = BrushFromHex("#24324A"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(11, 9, 11, 9),
+                Margin = new Thickness(0, 0, 0, 9)
+            };
+
+            StackPanel devStack = new StackPanel();
+            devStack.Children.Add(new TextBlock
+            {
+                Text = "DEVELOPER & AUTHOR INFORMATION",
+                FontSize = 9.5,
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                Foreground = BrushFromHex("#A78BFA"),
+                Margin = new Thickness(0, 0, 0, 6)
+            });
+
+            Grid devNameRow = new Grid { Margin = new Thickness(0, 0, 0, 3) };
+            devNameRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(68) });
+            devNameRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            TextBlock devLbl = new TextBlock { Text = "Developer:", FontSize = 10.1, Foreground = BrushFromHex("#94A3B8") };
+            TextBlock devVal = new TextBlock
+            {
+                Text = "Mehedi Hasan Shihab (Web & Software Developer)",
+                FontSize = 10.1,
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                Foreground = BrushFromHex("#F8FAFC"),
+                TextWrapping = TextWrapping.Wrap
+            };
+            Grid.SetColumn(devLbl, 0);
+            Grid.SetColumn(devVal, 1);
+            devNameRow.Children.Add(devLbl);
+            devNameRow.Children.Add(devVal);
+            devStack.Children.Add(devNameRow);
+
+            devStack.Children.Add(new TextBlock
+            {
+                Text = "Focused on building fast, clean, user-centric desktop tools and full-stack web applications.",
+                FontSize = 9.6,
+                Foreground = BrushFromHex("#64748B"),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 1, 0, 7)
+            });
+
+            devStack.Children.Add(CreateDeveloperLinkRow("Portfolio:", "https://sshihabb007.github.io/", "https://sshihabb007.github.io/"));
+            devStack.Children.Add(CreateDeveloperLinkRow("Email Me:", "sshihabb007@gmail.com", "mailto:sshihabb007@gmail.com?subject=Monitor%20Display%20Switcher"));
+            devStack.Children.Add(CreateDeveloperLinkRow("GitHub:", "github.com/sshihabb007 (@sshihabb007)", "https://github.com/sshihabb007"));
+            devStack.Children.Add(CreateDeveloperLinkRow("LinkedIn:", "linkedin.com/in/mehedi-hasan-shihab", "https://www.linkedin.com/in/mehedi-hasan-shihab"));
+            devStack.Children.Add(CreateDeveloperLinkRow("Repository:", "github.com/sshihabb007/monitor-display-switcher", "https://github.com/sshihabb007/monitor-display-switcher"));
+
+            devStack.Children.Add(new TextBlock
+            {
+                Text = "Copyright © 2026 Mehedi Hasan Shihab (sshihabb007) • MIT License",
+                FontSize = 9.3,
+                Foreground = BrushFromHex("#64748B"),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 6, 0, 0)
+            });
+
+            devCard.Child = devStack;
+            sp.Children.Add(devCard);
+
+            // Action Buttons Row (Portfolio, Email Me, GitHub, LinkedIn)
+            WrapPanel actionsRow = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Left };
+            Border btnPort = CreateCompactPillButton("Visit Portfolio", "#7C5CFF", delegate { OpenExternalUri("https://sshihabb007.github.io/"); });
+            btnPort.Margin = new Thickness(0, 0, 6, 0);
+            Border btnMail = CreateCompactPillButton("Email Me", "#4F46E5", delegate { OpenExternalUri("mailto:sshihabb007@gmail.com?subject=Monitor%20Display%20Switcher"); });
+            btnMail.Margin = new Thickness(0, 0, 6, 0);
+            Border btnGh = CreateCompactPillButton("GitHub", "#1E293B", delegate { OpenExternalUri("https://github.com/sshihabb007"); });
+            btnGh.Margin = new Thickness(0, 0, 6, 0);
+            Border btnLi = CreateCompactPillButton("LinkedIn", "#0A66C2", delegate { OpenExternalUri("https://www.linkedin.com/in/mehedi-hasan-shihab"); });
+
+            actionsRow.Children.Add(btnPort);
+            actionsRow.Children.Add(btnMail);
+            actionsRow.Children.Add(btnGh);
+            actionsRow.Children.Add(btnLi);
+            sp.Children.Add(actionsRow);
+
+            _aboutDrawerContent.Child = sp;
+            return _aboutDrawerContent;
+        }
+
+        private UIElement CreateDeveloperLinkRow(string labelText, string displayUrl, string targetUri)
+        {
+            Grid row = new Grid { Margin = new Thickness(0, 2, 0, 2) };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(68) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            TextBlock lbl = new TextBlock
+            {
+                Text = labelText,
+                FontSize = 9.7,
+                Foreground = BrushFromHex("#94A3B8"),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(lbl, 0);
+            row.Children.Add(lbl);
+
+            TextBlock link = new TextBlock
+            {
+                Text = displayUrl,
+                FontSize = 9.7,
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                Foreground = BrushFromHex("#818CF8"),
+                Cursor = Cursors.Hand,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                ToolTip = targetUri
+            };
+            link.MouseEnter += delegate
+            {
+                link.Foreground = BrushFromHex("#38BDF8");
+                link.TextDecorations = TextDecorations.Underline;
+            };
+            link.MouseLeave += delegate
+            {
+                link.Foreground = BrushFromHex("#818CF8");
+                link.TextDecorations = null;
+            };
+            link.MouseLeftButtonUp += delegate
+            {
+                OpenExternalUri(targetUri);
+            };
+            Grid.SetColumn(link, 1);
+            row.Children.Add(link);
+            return row;
+        }
+
+        private static void OpenExternalUri(string uri)
+        {
+            try
+            {
+                System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(uri);
+                psi.UseShellExecute = true;
+                System.Diagnostics.Process.Start(psi);
+            }
+            catch
+            {
+            }
+        }
+
         private Border CreateSchemePresetPill(string text, Action onClick)
         {
             Border b = new Border
@@ -1270,11 +1545,14 @@ namespace DisplayInputSwitcher.UI
 
             TextBlock credit = new TextBlock
             {
-                Text = "Universal DDC/CI • Shihab",
+                Text = "Mehedi Hasan Shihab",
                 Foreground = BrushFromHex("#475569"),
                 FontSize = 9.8,
-                Margin = new Thickness(8, 0, 0, 0)
+                Margin = new Thickness(8, 0, 0, 0),
+                Cursor = Cursors.Hand,
+                ToolTip = "About Developer — Mehedi Hasan Shihab"
             };
+            credit.MouseLeftButtonUp += delegate { ToggleAboutDrawer(); };
             Grid.SetColumn(credit, 1);
             footer.Children.Add(credit);
             return footer;
@@ -1477,6 +1755,18 @@ namespace DisplayInputSwitcher.UI
                 if (sg != null)
                 {
                     sg.Foreground = _settingsOpen ? BrushFromHex("#A78BFA") : BrushFromHex("#94A3B8");
+                }
+            }
+            if (_aboutButton != null)
+            {
+                _aboutButton.Background = _aboutOpen ? BrushFromHex("#0E3A4C") : Brushes.Transparent;
+                if (_aboutBadgeCircle != null)
+                {
+                    _aboutBadgeCircle.BorderBrush = _aboutOpen ? BrushFromHex("#22D3EE") : BrushFromHex("#94A3B8");
+                }
+                if (_aboutBadgeGlyph != null)
+                {
+                    _aboutBadgeGlyph.Foreground = _aboutOpen ? BrushFromHex("#67E8F9") : BrushFromHex("#94A3B8");
                 }
             }
         }
@@ -1951,8 +2241,34 @@ namespace DisplayInputSwitcher.UI
         private void ToggleSettingsDrawer()
         {
             _settingsOpen = !_settingsOpen;
+            if (_settingsOpen && _aboutOpen)
+            {
+                _aboutOpen = false;
+                _aboutDrawerContent.Visibility = Visibility.Collapsed;
+            }
             _settingsDrawerContent.Visibility = _settingsOpen ? Visibility.Visible : Visibility.Collapsed;
             UpdateToolbarHighlights();
+        }
+
+        private void ToggleAboutDrawer()
+        {
+            _aboutOpen = !_aboutOpen;
+            if (_aboutOpen && _settingsOpen)
+            {
+                _settingsOpen = false;
+                _settingsDrawerContent.Visibility = Visibility.Collapsed;
+            }
+            _aboutDrawerContent.Visibility = _aboutOpen ? Visibility.Visible : Visibility.Collapsed;
+            UpdateToolbarHighlights();
+        }
+
+        private void OpenAboutDeveloperView()
+        {
+            RestoreAndActivateWindow();
+            if (!_aboutOpen)
+            {
+                ToggleAboutDrawer();
+            }
         }
 
         public void RestoreAndActivateWindow()
@@ -2052,6 +2368,17 @@ namespace DisplayInputSwitcher.UI
                 await Task.Delay(180);
                 UpdateLayout();
                 SaveWindowPng(System.IO.Path.Combine(outputDir, "ui_expanded.png"));
+
+                _settingsOpen = false;
+                _settingsDrawerContent.Visibility = Visibility.Collapsed;
+                _quickDrawerContent.Visibility = Visibility.Collapsed;
+                _quickDrawerChevron.Text = "▾";
+                _aboutOpen = true;
+                _aboutDrawerContent.Visibility = Visibility.Visible;
+                UpdateToolbarHighlights();
+                await Task.Delay(120);
+                UpdateLayout();
+                SaveWindowPng(System.IO.Path.Combine(outputDir, "ui_about.png"));
             }
             catch
             {

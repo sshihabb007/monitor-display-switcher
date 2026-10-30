@@ -28,8 +28,36 @@ namespace DisplayInputSwitcher.Services
             {
                 baseName = "DisplayInputSwitcher";
             }
-            _configFilePath = Path.Combine(dir, baseName + ".config.json");
+
+            string candidatePath = Path.Combine(dir, baseName + ".config.json");
+            if (IsDirectoryWritable(dir))
+            {
+                _configFilePath = candidatePath;
+            }
+            else
+            {
+                string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                string fallbackDir = Path.Combine(localAppData, "MonitorDisplaySwitcher");
+                try { Directory.CreateDirectory(fallbackDir); } catch { }
+                _configFilePath = Path.Combine(fallbackDir, baseName + ".config.json");
+            }
             _serializer = new JavaScriptSerializer();
+        }
+
+        private static bool IsDirectoryWritable(string dirPath)
+        {
+            if (string.IsNullOrEmpty(dirPath) || !Directory.Exists(dirPath)) return false;
+            try
+            {
+                string probe = Path.Combine(dirPath, ".dis_write_probe_" + Process.GetCurrentProcess().Id + ".tmp");
+                File.WriteAllText(probe, "ok");
+                File.Delete(probe);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         public string ConfigFilePath

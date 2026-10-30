@@ -10,13 +10,13 @@ using DisplayInputSwitcher.Core;
 using DisplayInputSwitcher.Services;
 using DisplayInputSwitcher.UI;
 
-[assembly: AssemblyTitle("Display Input Switcher")]
-[assembly: AssemblyDescription("Universal Portable DDC/CI Monitor HDMI & DisplayPort Switcher")]
-[assembly: AssemblyCompany("Shihab")]
-[assembly: AssemblyProduct("Display Input Switcher")]
-[assembly: AssemblyCopyright("Copyright © 2026 Shihab")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyTitle("Monitor Display Switcher")]
+[assembly: AssemblyDescription("Universal DDC/CI Monitor HDMI, DisplayPort & USB-C Switcher (Mehedi Hasan Shihab)")]
+[assembly: AssemblyCompany("Mehedi Hasan Shihab")]
+[assembly: AssemblyProduct("Monitor Display Switcher")]
+[assembly: AssemblyCopyright("Copyright © 2026 Mehedi Hasan Shihab (sshihabb007)")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 [assembly: ComVisible(false)]
 
 namespace DisplayInputSwitcher

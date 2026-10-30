@@ -1,5 +1,6 @@
 # Compiled binaries, generated icons, and build outputs (build via .\build.ps1)
 dist/
+release-dist/
 bin/
 obj/
 assets/*.ico
@@ -7,6 +8,7 @@ assets/*.ico
 *.dll
 *.pdb
 *.ico
+*.zip
 
 # Portable runtime configuration & temporary files
 *.config.json

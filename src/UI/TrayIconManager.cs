@@ -22,6 +22,7 @@ namespace DisplayInputSwitcher.UI
         private readonly ToolStripSeparator _extraPortsSep;
         private readonly List<ToolStripMenuItem> _extraPortItems = new List<ToolStripMenuItem>();
         private readonly ToolStripMenuItem _pinItem;
+        private readonly ToolStripMenuItem _aboutItem;
         private readonly ToolStripMenuItem _openItem;
         private readonly ToolStripMenuItem _exitItem;
 
@@ -29,6 +30,7 @@ namespace DisplayInputSwitcher.UI
         private bool _disposed;
 
         public event Action OpenWindowRequested;
+        public event Action AboutRequested;
         public event Action SwitchHdmiRequested;
         public event Action SwitchDpRequested;
         public event Action ToggleInputRequested;
@@ -65,6 +67,9 @@ namespace DisplayInputSwitcher.UI
             _pinItem = new ToolStripMenuItem("Always on Top");
             _pinItem.Click += delegate { Raise(ToggleAlwaysOnTopRequested); };
 
+            _aboutItem = new ToolStripMenuItem("ℹ  About Developer (Mehedi Hasan Shihab)");
+            _aboutItem.Click += delegate { Raise(AboutRequested); };
+
             _openItem = new ToolStripMenuItem("Open Switcher Window");
             _openItem.Font = new Font("Segoe UI Semibold", 9.25f, FontStyle.Bold);
             _openItem.Click += delegate { Raise(OpenWindowRequested); };
@@ -81,6 +86,7 @@ namespace DisplayInputSwitcher.UI
             _menu.Items.Add(_extraPortsSep);
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add(_pinItem);
+            _menu.Items.Add(_aboutItem);
             _menu.Items.Add(_openItem);
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add(_exitItem);

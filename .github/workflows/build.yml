@@ -1,0 +1,135 @@
+name: Build & Release Monitor Display Switcher
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-releases:
+    name: Build Portable & Setup Installer (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3 for multi-size icon generation
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile Portable & Setup Installer via build.ps1
+        shell: pwsh
+        run: |
+          $TagVer = if ($env:GITHUB_REF_NAME -like 'v*') { $env:GITHUB_REF_NAME } else { 'v1.2.0' }
+          $VerClean = $TagVer.TrimStart('v')
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipDesktopCopy -Version $VerClean
+
+      - name: Stage Portable EXE, Setup Installer EXE & SHA-256 Checksums
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "release-dist" | Out-Null
+
+          $TagVer = if ($env:GITHUB_REF_NAME -like 'v*') { $env:GITHUB_REF_NAME } else { 'v1.2.0' }
+          $VerClean = $TagVer.TrimStart('v')
+
+          $PortableName = "Monitor-Display-Switcher-Portable-$VerClean.exe"
+          $SetupName = "Monitor-Display-Switcher-Setup-$VerClean.exe"
+
+          $BuiltPortable = Join-Path $PWD "dist\$PortableName"
+          $BuiltSetup = Join-Path $PWD "dist\$SetupName"
+
+          $StagedPortable = Join-Path $PWD "release-dist\$PortableName"
+          $StagedSetup = Join-Path $PWD "release-dist\$SetupName"
+
+          Copy-Item -LiteralPath $BuiltPortable -Destination $StagedPortable -Force
+          Copy-Item -LiteralPath $BuiltSetup -Destination $StagedSetup -Force
+
+          $PortableSha = (Get-FileHash -LiteralPath $StagedPortable -Algorithm SHA256).Hash.ToLowerInvariant()
+          $SetupSha = (Get-FileHash -LiteralPath $StagedSetup -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          $SumsLines = @(
+            "$SetupSha  $SetupName",
+            "$PortableSha  $PortableName"
+          )
+          Set-Content -Path (Join-Path $PWD "release-dist\SHA256SUMS.txt") -Value ($SumsLines -join "`r`n") -Encoding UTF8
+
+          $NotesTemplate = @'
+          ## Monitor Display Switcher {{TAG_VER}} — Official Portable & Setup Installer (Mehedi Hasan Shihab)
+
+          Choose whichever edition fits your workflow:
+          - **Setup Installer (`{{SETUP_NAME}}`)** — Graphical Windows dark Setup Wizard with Desktop shortcut, Start Menu shortcuts, optional System Tray auto-startup, and clean Windows *Installed Apps* `Uninstall.exe`.
+          - **Portable Edition (`{{PORTABLE_NAME}}`)** — True single-file (`~205 KB`), zero-install portable executable that runs anywhere on Windows 10 / 11 (`x64`, `ARM64`, and `x86`).
+
+          ### Key Features Included in {{TAG_VER}}
+          - **Universal Multi-Monitor VCP Auto-Detection**: Automatically inspects VESA EDID (`ManufacturerCode`, `MonitorName`, `SerialNumber`) and MCCS `vcp(...)` capabilities to map HDMI, DisplayPort, and USB-C codes across **Dell, ASUS, MSI, Gigabyte, BenQ, Samsung, Acer, HP, ViewSonic** (`15`/`16`/`17`/`18`/`27`), **LG UltraGear / UltraWide** (`1` / `3`), and **LG Gen5** (`144` / `208` on `VCP F4`).
+          - **1-Click HDMI & DisplayPort Hero Cards + Multi-Port Chips**: Instant switching, `⇄` mapping swap, automatic port chips on 3+ input monitors, and per-monitor saved profiles.
+          - **Global Keyboard Shortcuts**: Customizable background shortcuts (`Ctrl+Alt+1` HDMI, `Ctrl+Alt+2` DisplayPort, `Ctrl+Alt+S` Toggle) for blind switch-back.
+          - **Quick Hardware Controls & System Tray**: Live debounced sliders for **Brightness (`VCP 10`)**, **Speaker Volume (`VCP 62`)**, and **Audio Mute (`VCP 8D`)**, plus dark System Tray menu.
+          - **In-App Developer Info (`i` Header Button)**: Quick-access About Developer panel in the top-right header with portfolio, email, GitHub, and LinkedIn links.
+
+          ### Developer
+          - **Mehedi Hasan Shihab** *(Web & Software Developer)*
+          - **Portfolio**: https://sshihabb007.github.io/
+          - **GitHub**: https://github.com/sshihabb007
+          - **LinkedIn**: https://www.linkedin.com/in/mehedi-hasan-shihab
+          - **Email**: sshihabb007@gmail.com
+
+          ### SHA-256 Checksums
+          | File | Edition | SHA-256 |
+          | :--- | :--- | :--- |
+          | `{{SETUP_NAME}}` | Windows Setup Installer | `{{SETUP_SHA}}` |
+          | `{{PORTABLE_NAME}}` | Standalone Portable `.exe` | `{{PORTABLE_SHA}}` |
+          '@
+          $NotesLines = ($NotesTemplate -split "`r?`n") | ForEach-Object { $_ -replace '^\s{10}', '' }
+          $NotesBody = ($NotesLines -join "`r`n").
+            Replace('{{TAG_VER}}', $TagVer).
+            Replace('{{SETUP_NAME}}', $SetupName).
+            Replace('{{PORTABLE_NAME}}', $PortableName).
+            Replace('{{SETUP_SHA}}', $SetupSha).
+            Replace('{{PORTABLE_SHA}}', $PortableSha)
+          Set-Content -Path (Join-Path $PWD "release-dist\RELEASE_NOTES.md") -Value $NotesBody -Encoding UTF8
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Monitor-Display-Switcher-Windows-Releases
+          path: |
+            release-dist/Monitor-Display-Switcher-Setup-*.exe
+            release-dist/Monitor-Display-Switcher-Portable-*.exe
+            release-dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Remove Previous Release Entry for Tag (if re-releasing)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "${{ github.ref_name }}" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete "${{ github.ref_name }}" --yes
+          }
+          $global:LASTEXITCODE = 0
+
+      - name: Publish GitHub Release on Version Tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Monitor Display Switcher ${{ github.ref_name }} (Mehedi Hasan Shihab)"
+          body_path: release-dist/RELEASE_NOTES.md
+          make_latest: "true"
+          files: |
+            release-dist/Monitor-Display-Switcher-Setup-*.exe
+            release-dist/Monitor-Display-Switcher-Portable-*.exe
+            release-dist/SHA256SUMS.txt
