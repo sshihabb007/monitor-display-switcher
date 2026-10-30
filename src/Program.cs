@@ -11,12 +11,12 @@ using DisplayInputSwitcher.Services;
 using DisplayInputSwitcher.UI;
 
 [assembly: AssemblyTitle("Display Input Switcher")]
-[assembly: AssemblyDescription("Modern Portable DDC/CI Monitor HDMI & DisplayPort Switcher")]
+[assembly: AssemblyDescription("Universal Portable DDC/CI Monitor HDMI & DisplayPort Switcher")]
 [assembly: AssemblyCompany("Shihab")]
 [assembly: AssemblyProduct("Display Input Switcher")]
 [assembly: AssemblyCopyright("Copyright © 2026 Shihab")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 [assembly: ComVisible(false)]
 
 namespace DisplayInputSwitcher
@@ -140,7 +140,7 @@ namespace DisplayInputSwitcher
             using (MonitorDiscoveryService disc = new MonitorDiscoveryService())
             using (DdcCiService ddc = new DdcCiService(disc))
             {
-                disc.RefreshMonitors(doStatus);
+                disc.RefreshMonitors(true);
                 MonitorDeviceRecord target = ddc.ResolveTargetMonitor(cfg.SelectedMonitorKey);
                 if (target == null)
                 {
@@ -148,10 +148,25 @@ namespace DisplayInputSwitcher
                     return 2;
                 }
 
+                MonitorInputProfile saved = ConfigService.GetProfileForMonitor(cfg, target.StableSelectionKey);
+                byte? customVcp = (saved != null && saved.IsUserCustomized) ? (byte?)saved.InputVcpCode : null;
+                byte vcpQuery = customVcp.HasValue ? customVcp.Value : target.PreferredInputVcpCode;
+
+                List<byte> discrete = new List<byte>();
+                if (target.Capabilities != null)
+                {
+                    discrete = target.Capabilities.GetValuesForVcp(vcpQuery);
+                    if (discrete.Count == 0)
+                    {
+                        discrete = target.Capabilities.GetInputSelectValues();
+                    }
+                }
+
                 if (doStatus)
                 {
                     DdcResult<MonitorLiveSnapshot> snap = ddc.ReadLiveSnapshotAsync(
                         target.StableSelectionKey,
+                        customVcp,
                         cfg.UseOneByteInputMask,
                         cfg.RetryOnI2cFailure,
                         true).GetAwaiter().GetResult();
@@ -161,33 +176,88 @@ namespace DisplayInputSwitcher
                         WriteReport(outFile, "ERROR: " + snap.ErrorMessage);
                         return 1;
                     }
+
+                    ResolvedMonitorInputMap statusMap = InputProfileResolver.Resolve(
+                        target.ManufacturerCode,
+                        target.PreferredInputVcpCode,
+                        discrete,
+                        snap.Value.CurrentInputValue,
+                        snap.Value.MaxInputValue,
+                        saved);
+
                     WriteReport(
                         outFile,
                         string.Format(
-                            "Monitor={0} | Device={1} | GPU={2} | Input={3} (Raw=0x{4:X4}) | Brightness={5} | Volume={6} | Latency={7}ms",
+                            "Monitor={0} | Device={1} | GPU={2} | Scheme={3} | VCP=0x{4:X2} | Input={5} (Raw=0x{6:X4}) | Mapped=[HDMI={7}, DP={8}] | Brightness={9} | Volume={10} | Latency={11}ms",
                             target.FriendlyTitle,
                             target.MonitorDeviceName,
                             target.AdapterName,
+                            statusMap.DetectionSummary,
+                            statusMap.InputVcpCode,
                             snap.Value.CurrentInputValue,
                             snap.Value.RawInputValue ?? 0u,
+                            statusMap.HdmiValue,
+                            statusMap.DpValue,
                             snap.Value.Brightness.HasValue ? snap.Value.Brightness.Value.ToString() : "N/A",
                             snap.Value.Volume.HasValue ? snap.Value.Volume.Value.ToString() : "N/A",
                             snap.Value.ReadLatencyMs));
                     return 0;
                 }
 
+                uint? liveCur = null;
+                uint? liveMax = null;
+                if (discrete.Count == 0 && (saved == null || !saved.IsUserCustomized))
+                {
+                    DdcResult<MonitorLiveSnapshot> preSnap = ddc.ReadLiveSnapshotAsync(
+                        target.StableSelectionKey,
+                        customVcp,
+                        cfg.UseOneByteInputMask,
+                        cfg.RetryOnI2cFailure,
+                        false).GetAwaiter().GetResult();
+                    if (preSnap.IsSuccess)
+                    {
+                        liveCur = preSnap.Value.CurrentInputValue;
+                        liveMax = preSnap.Value.MaxInputValue;
+                    }
+                }
+
+                ResolvedMonitorInputMap map = InputProfileResolver.Resolve(
+                    target.ManufacturerCode,
+                    target.PreferredInputVcpCode,
+                    discrete,
+                    liveCur,
+                    liveMax,
+                    saved);
+
                 DdcResult<uint> swRes;
                 if (doHdmi)
                 {
-                    swRes = ddc.SetInputSourceAsync(target.StableSelectionKey, cfg.HdmiValue, cfg.UseOneByteInputMask, cfg.RetryOnI2cFailure).GetAwaiter().GetResult();
+                    swRes = ddc.SetInputSourceAsync(
+                        target.StableSelectionKey,
+                        map.InputVcpCode,
+                        map.HdmiValue,
+                        cfg.UseOneByteInputMask,
+                        cfg.RetryOnI2cFailure).GetAwaiter().GetResult();
                 }
                 else if (doDp)
                 {
-                    swRes = ddc.SetInputSourceAsync(target.StableSelectionKey, cfg.DpValue, cfg.UseOneByteInputMask, cfg.RetryOnI2cFailure).GetAwaiter().GetResult();
+                    swRes = ddc.SetInputSourceAsync(
+                        target.StableSelectionKey,
+                        map.InputVcpCode,
+                        map.DpValue,
+                        cfg.UseOneByteInputMask,
+                        cfg.RetryOnI2cFailure).GetAwaiter().GetResult();
                 }
                 else
                 {
-                    swRes = ddc.ToggleInputSourceAsync(target.StableSelectionKey, cfg.HdmiValue, cfg.DpValue, null, cfg.UseOneByteInputMask, cfg.RetryOnI2cFailure).GetAwaiter().GetResult();
+                    swRes = ddc.ToggleInputSourceAsync(
+                        target.StableSelectionKey,
+                        map.InputVcpCode,
+                        map.HdmiValue,
+                        map.DpValue,
+                        liveCur,
+                        cfg.UseOneByteInputMask,
+                        cfg.RetryOnI2cFailure).GetAwaiter().GetResult();
                 }
 
                 if (!swRes.IsSuccess)
@@ -196,7 +266,7 @@ namespace DisplayInputSwitcher
                     return 1;
                 }
 
-                WriteReport(outFile, string.Format("OK: Input={0} ({1}ms)", swRes.Value, swRes.ElapsedMs));
+                WriteReport(outFile, string.Format("OK: VCP=0x{0:X2} Input={1} ({2}ms)", map.InputVcpCode, swRes.Value, swRes.ElapsedMs));
                 return 0;
             }
         }
@@ -247,26 +317,101 @@ namespace DisplayInputSwitcher
             check("MCCS VCP 60 discrete values [1, 3]", inVals.Count == 2 && inVals[0] == 1 && inVals[1] == 3);
             check("MCCS VCP 10/62/8D presence", caps.SupportedVcpCodes.Contains(0x10) && caps.SupportedVcpCodes.Contains(0x62) && caps.SupportedVcpCodes.Contains(0x8D));
 
-            // 3. VCP 0x60 1-byte low-byte normalization regression test (fixes ControlMyMonitor /SwitchValue 0x0040c3ef high-byte bug)
-            VcpFeatureReply masked = DdcCiService.NormalizeVcpReply(0x60, 0, 0x0F01u, 0x0F03u, true);
+            string lgGen5Mccs = "(prot(monitor)type(lcd)model(27GP850)vcp(10 12 F4(90 91 D0 D1))mccs_ver(2.1))";
+            MonitorCapabilities capsGen5 = MccsCapabilitiesParser.Parse(lgGen5Mccs);
+            List<byte> f4Vals = capsGen5.GetValuesForVcp(0xF4);
+            check("MCCS LG Gen5 VCP F4 discrete values [144, 145, 208, 209]",
+                f4Vals.Count == 4 && f4Vals[0] == 144 && f4Vals[1] == 145 && f4Vals[2] == 208 && f4Vals[3] == 209);
+
+            // 3. VCP 0x60 / 0xF4 1-byte low-byte normalization regression tests
+            VcpFeatureReply masked60 = DdcCiService.NormalizeVcpReply(0x60, 0, 0x0F01u, 0x0F03u, true);
             check("VCP 0x60 high-byte status 0x0F01 normalized to 1 while preserving raw 0x0F01",
-                masked.NormalizedCurrentValue == 1u &&
-                masked.NormalizedMaxValue == 3u &&
-                masked.RawCurrentValue == 0x0F01u &&
-                masked.WasOneByteMasked);
+                masked60.NormalizedCurrentValue == 1u &&
+                masked60.NormalizedMaxValue == 3u &&
+                masked60.RawCurrentValue == 0x0F01u &&
+                masked60.WasOneByteMasked);
+
+            VcpFeatureReply maskedF4 = DdcCiService.NormalizeVcpReply(0xF4, 0, 0x0190u, 0x01D1u, true);
+            check("VCP 0xF4 high-byte status 0x0190 normalized to 144 (0x90)",
+                maskedF4.NormalizedCurrentValue == 144u &&
+                maskedF4.NormalizedMaxValue == 209u &&
+                maskedF4.WasOneByteMasked);
 
             VcpFeatureReply unmaskedOther = DdcCiService.NormalizeVcpReply(0xC0, 0, 3096u, 65535u, true);
-            check("Non-0x60 VCP codes (e.g. 0xC0 Usage Time 3096) are never 1-byte truncated",
+            check("Non-input VCP codes (e.g. 0xC0 Usage Time 3096) are never 1-byte truncated",
                 unmaskedOther.NormalizedCurrentValue == 3096u && !unmaskedOther.WasOneByteMasked);
 
-            // 4. Global hotkey parser test
+            // 4. Universal InputProfileResolver multi-vendor auto-detection tests
+            ResolvedMonitorInputMap mapLg = InputProfileResolver.Resolve("GSM", 0x60, new List<byte> { 1, 3 }, 1u, 3u, null);
+            check("Resolver LG Compact [1, 3] -> HDMI=1, DP=3",
+                mapLg.InputVcpCode == 0x60 && mapLg.HdmiValue == 1u && mapLg.DpValue == 3u && mapLg.DetectedOptions.Count == 2);
+
+            ResolvedMonitorInputMap mapDell = InputProfileResolver.Resolve("DEL", 0x60, new List<byte> { 15, 17, 18 }, 15u, 18u, null);
+            check("Resolver VESA Standard (Dell/ASUS/MSI/BenQ) [15, 17, 18] -> HDMI=17, DP=15, 3 ports",
+                mapDell.InputVcpCode == 0x60 && mapDell.HdmiValue == 17u && mapDell.DpValue == 15u && mapDell.DetectedOptions.Count == 3);
+
+            ResolvedMonitorInputMap mapUsbC = InputProfileResolver.Resolve("AUS", 0x60, new List<byte> { 15, 17, 18, 27 }, 18u, 27u, null);
+            check("Resolver VESA 4-Port USB-C [15, 17, 18, 27] with active HDMI 2 (18) -> HDMI=18, DP=15, 4 ports",
+                mapUsbC.HdmiValue == 18u && mapUsbC.DpValue == 15u && mapUsbC.DetectedOptions.Count == 4);
+
+            ResolvedMonitorInputMap mapLgGen5 = InputProfileResolver.Resolve("GSM", 0xF4, new List<byte> { 144, 145, 208, 209 }, 144u, 209u, null);
+            check("Resolver LG Gen5 VCP F4 [144, 145, 208, 209] -> VCP=0xF4, HDMI=144, DP=208",
+                mapLgGen5.InputVcpCode == 0xF4 && mapLgGen5.HdmiValue == 144u && mapLgGen5.DpValue == 208u);
+
+            ResolvedMonitorInputMap mapCustomVendor = InputProfileResolver.Resolve("UNK", 0x60, new List<byte> { 2, 4 }, 2u, 4u, null);
+            check("Resolver arbitrary vendor discrete [2, 4] -> binds directly to [2, 4]",
+                mapCustomVendor.HdmiValue == 2u && mapCustomVendor.DpValue == 4u);
+
+            ResolvedMonitorInputMap mapMissingCapsVesa = InputProfileResolver.Resolve("SAM", 0x60, new List<byte>(), 17u, 18u, null);
+            check("Resolver missing MCCS discrete list + live VESA cur=17 -> infers VESA [17, 15]",
+                mapMissingCapsVesa.HdmiValue == 17u && mapMissingCapsVesa.DpValue == 15u);
+
+            MonitorInputProfile customProf = new MonitorInputProfile
+            {
+                InputVcpCode = 0x60,
+                HdmiValue = 18u,
+                DpValue = 27u,
+                HdmiLabel = "HDMI 2",
+                DpLabel = "USB-C",
+                IsUserCustomized = true
+            };
+            ResolvedMonitorInputMap mapCustomOverride = InputProfileResolver.Resolve("DEL", 0x60, new List<byte> { 15, 17, 18, 27 }, 18u, 27u, customProf);
+            check("Resolver honors per-monitor saved user override [18, 27]",
+                mapCustomOverride.IsUserCustomized && mapCustomOverride.HdmiValue == 18u && mapCustomOverride.DpValue == 27u);
+
+            // 5. Dxva2 0-based PHYSICAL_MONITOR handle (0x0) ownership & cleanup regression test
+            bool destroyedZeroHandle = false;
+            IntPtr destroyedValue = new IntPtr(-1);
+            using (MonitorDeviceRecord zeroHandleRec = new MonitorDeviceRecord(delegate(IntPtr h)
+            {
+                destroyedZeroHandle = true;
+                destroyedValue = h;
+            }))
+            {
+                zeroHandleRec.PhysicalMonitorHandle = IntPtr.Zero;
+                zeroHandleRec.HasPhysicalHandle = true;
+            }
+            check("Dxva2 index-0 handle (0x0) is owned and destroyed on Dispose()",
+                destroyedZeroHandle && destroyedValue == IntPtr.Zero);
+
+            bool destroyedUnacquired = false;
+            using (MonitorDeviceRecord unacquiredRec = new MonitorDeviceRecord(delegate(IntPtr h)
+            {
+                destroyedUnacquired = true;
+            }))
+            {
+            }
+            check("Unacquired MonitorDeviceRecord never invokes destroy callback", !destroyedUnacquired);
+
+            // 6. Global hotkey parser test
             ParsedHotkey hk1, hk2, hk3;
             check("Hotkey parser Ctrl+Alt+1", GlobalHotkeyManager.TryParseCombo("Ctrl+Alt+1", out hk1) && hk1.CanonicalText == "Ctrl+Alt+1");
             check("Hotkey parser Ctrl+Alt+2", GlobalHotkeyManager.TryParseCombo("Ctrl+Alt+2", out hk2) && hk2.CanonicalText == "Ctrl+Alt+2");
             check("Hotkey parser Ctrl+Alt+S", GlobalHotkeyManager.TryParseCombo("Ctrl+Alt+S", out hk3) && hk3.CanonicalText == "Ctrl+Alt+S");
 
-            // 5. Read-only live hardware discovery & VCP 0x60 probe (NO SetVCPFeature writes!)
+            // 6. Read-only live hardware discovery & universal auto-resolve probe (NO SetVCPFeature writes!)
             log.AppendLine("--- LIVE READ-ONLY HARDWARE PROBE ---");
+            log.AppendLine(string.Format("Process64Bit={0} | OS64Bit={1}", Environment.Is64BitProcess, Environment.Is64BitOperatingSystem));
             using (MonitorDiscoveryService disc = new MonitorDiscoveryService())
             using (DdcCiService ddc = new DdcCiService(disc))
             {
@@ -275,28 +420,45 @@ namespace DisplayInputSwitcher
                 for (int i = 0; i < liveMons.Count; i++)
                 {
                     MonitorDeviceRecord m = liveMons[i];
-                    List<byte> p60 = (m.Capabilities != null) ? m.Capabilities.GetInputSelectValues() : new List<byte>();
+                    List<byte> pIn = (m.Capabilities != null) ? m.Capabilities.GetInputSelectValues() : new List<byte>();
                     log.AppendLine(string.Format(
-                        "  [{0}] Title='{1}' | Device='{2}' | GPU='{3}' | ShortID='{4}' | SupportsInputSelect={5} | Possible60=[{6}]",
+                        "  [{0}] Title='{1}' | Device='{2}' | GPU='{3}' | Mfg='{4}' | ShortID='{5}' | SupportsInputSelect={6} | PrefVCP=0x{7:X2} | Possible=[{8}]",
                         i,
                         m.FriendlyTitle,
                         m.MonitorDeviceName,
                         m.AdapterName,
+                        m.ManufacturerCode,
                         m.ShortMonitorId,
                         m.SupportsInputSelect,
-                        string.Join(",", p60)));
+                        m.PreferredInputVcpCode,
+                        string.Join(",", pIn)));
                 }
 
                 MonitorDeviceRecord target = ddc.ResolveTargetMonitor(string.Empty);
                 if (target != null && target.SupportsInputSelect)
                 {
-                    DdcResult<MonitorLiveSnapshot> snap = ddc.ReadLiveSnapshotAsync(target.StableSelectionKey, true, true, true).GetAwaiter().GetResult();
+                    DdcResult<MonitorLiveSnapshot> snap = ddc.ReadLiveSnapshotAsync(target.StableSelectionKey, null, true, true, true).GetAwaiter().GetResult();
                     check("Live DDC/CI read on resolved external monitor succeeded", snap.IsSuccess);
                     if (snap.IsSuccess)
                     {
+                        List<byte> targetDiscrete = (target.Capabilities != null) ? target.Capabilities.GetInputSelectValues() : new List<byte>();
+                        ResolvedMonitorInputMap liveAutoMap = InputProfileResolver.Resolve(
+                            target.ManufacturerCode,
+                            target.PreferredInputVcpCode,
+                            targetDiscrete,
+                            snap.Value.CurrentInputValue,
+                            snap.Value.MaxInputValue,
+                            null);
+
                         log.AppendLine(string.Format(
-                            "  [LIVE SNAPSHOT] Target='{0}' | VCP60_Current={1} (Raw=0x{2:X4}) | Brightness={3}/{4} | Volume={5}/{6} | Muted={7} | Latency={8}ms",
+                            "  [LIVE AUTO-RESOLVED] Target='{0}' | Scheme='{1}' | VCP=0x{2:X2} | AutoHDMI={3} ({4}) | AutoDP={5} ({6}) | LiveActive={7} (Raw=0x{8:X4}) | Brightness={9}/{10} | Volume={11}/{12} | Muted={13} | Latency={14}ms",
                             target.FriendlyTitle,
+                            liveAutoMap.DetectionSummary,
+                            liveAutoMap.InputVcpCode,
+                            liveAutoMap.HdmiValue,
+                            liveAutoMap.HdmiLabel,
+                            liveAutoMap.DpValue,
+                            liveAutoMap.DpLabel,
                             snap.Value.CurrentInputValue,
                             snap.Value.RawInputValue ?? 0u,
                             snap.Value.Brightness,

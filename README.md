@@ -1,15 +1,19 @@
 # Monitor Display Switcher (`DisplayInputSwitcher`)
 
-A lightweight, single-file (`~176 KB`), zero-dependency portable Windows x64 desktop application for switching external monitor **HDMI** and **DisplayPort** inputs instantly over **DDC/CI (`Dxva2.dll`)**.
+A lightweight, single-file (`~196 KB`), zero-dependency universal portable Windows desktop application (`AnyCPU`: native `x64`, `ARM64`, and `x86`) for switching external monitor **HDMI**, **DisplayPort**, and **USB-C** inputs instantly over **DDC/CI (`Dxva2.dll`)**.
 
 ---
 
 ## Highlights
 
-- **True Single-File Portable `.exe`** — Compiles natively using the built-in Windows .NET Framework x64 compiler (`csc.exe` + WPF DirectX vector UI) with zero external DLLs or installation required.
-- **Smart Hardware & VESA EDID Discovery** — Correlates `EnumDisplayMonitors`, `EnumDisplayDevicesW`, and Windows Registry 128-byte EDID descriptors (`0xFC` Monitor Name + `0xFF` Serial Number). Automatically prioritizes external DDC/CI-capable monitors (such as **LG UltraGear**) ahead of internal laptop eDP panels.
-- **1-Click HDMI & DisplayPort Cards + Instant Swap (`⇄`)** — Pre-configured for `VCP 0x60` values `1` (`HDMI`) and `3` (`DisplayPort`), with a center `⇄` button to swap mappings and full support for custom VCP `60` codes (`0–255`).
-- **Normalized 1-Byte `VCP 0x60` Boundary** — Masks `VCP 0x60` replies (`& 0xFF`) consistently across UI reads, quick-toggles, and hotkeys while preserving raw `uint32` diagnostic metadata, avoiding high-byte status mismatches on LG/Dell/BenQ scalers.
+- **Universal Monitor Input Auto-Detection** — Automatically reads each monitor's VESA EDID (`ManufacturerCode`, `MonitorName`, `SerialNumber`) and MCCS `vcp(...)` capability table to resolve the right VCP feature code and input values out of the box—no manual lookup needed across:
+  - **Standard VESA MCCS Monitors** (*Dell, ASUS, MSI, Gigabyte, BenQ, Samsung, Acer, HP, AOC, ViewSonic*): `VCP 0x60` (`15` = DP 1, `16` = DP 2, `17` = HDMI 1, `18` = HDMI 2, `19` = HDMI 3, `27` = USB-C)
+  - **LG Compact DDC/CI Monitors** (*LG UltraGear / UltraWide*): `VCP 0x60` (`1` = HDMI, `3` = DisplayPort)
+  - **LG Gen5 Extended OSD Monitors**: `VCP 0xF4` or `0x60` (`144` = HDMI 1, `145` = HDMI 2, `208` = DisplayPort, `209` = USB-C)
+  - **3+ Port Monitors**: Automatically displays a 1-click port chip bar and tray menu items when a display exposes more than two inputs (e.g., `HDMI 1`, `HDMI 2`, `DP 1`, `USB-C`).
+  - **Per-Monitor Saved Profiles & 1-Click Presets**: Customize or swap (`⇄`) `VCP`, `HDMI`, and `DP` codes independently per monitor (keyed by EDID serial / device ID).
+- **Universal Windows Portability (`AnyCPU`)** — Compiles natively using the built-in Windows `.NET Framework 4.x` compiler (`csc.exe` + WPF DirectX vector UI) with zero external DLLs or installation required across `x64`, `ARM64`, and `x86` Windows devices.
+- **Normalized 1-Byte `VCP 0x60` / `0xF4` Boundary & Index-`0` Handle Ownership** — Masks input replies (`& 0xFF`) consistently across UI reads, quick-toggles, and hotkeys while preserving raw `uint32` diagnostic metadata, and properly owns `Dxva2` 0-based `PHYSICAL_MONITOR` handles (`0x0`, `0x1`, ...).
 - **Global Keyboard Shortcuts (Blind Switch-Back Ready)** — Customize shortcuts directly inside Settings:
   - `Ctrl+Alt+1` — Switch to **HDMI**
   - `Ctrl+Alt+2` — Switch to **DisplayPort**
@@ -19,24 +23,31 @@ A lightweight, single-file (`~176 KB`), zero-dependency portable Windows x64 des
 
 ---
 
+## Hardware Requirement
+
+External monitors must have **DDC/CI** enabled in their built-in physical OSD menu (enabled by default on almost all modern monitors) over a direct HDMI, DisplayPort, or USB-C DisplayPort Alt-Mode connection. Internal laptop eDP panels do not expose input-switching over DDC/CI and are automatically skipped in favor of external displays.
+
+---
+
 ## Project Structure
 
 ```text
 DisplayInputSwitcher/
-├── build.ps1                         # Generates icon, compiles x64 portable .exe, runs self-test
+├── build.ps1                         # Generates icon, compiles AnyCPU portable .exe, runs self-test
 ├── scripts/
 │   └── generate_icon.py              # Pure-Python multi-size (16..256px) ICO generator
 └── src/
-    ├── app.manifest                  # Per-Monitor V2 High-DPI Win32 manifest
+    ├── app.manifest                  # Per-Monitor V2 High-DPI & Windows compatibility manifest
     ├── Program.cs                    # Single-instance IPC, CLI mode, and self-test runner
     ├── Core/
-    │   ├── DdcCiModels.cs            # Domain models, result types, and portable config schema
+    │   ├── DdcCiModels.cs            # Domain models, result types, and per-monitor config schema
     │   ├── EdidParser.cs             # VESA 128-byte EDID parser (PnP ID, Name, Serial)
+    │   ├── InputProfileResolver.cs   # Universal VESA / LG Compact / LG Gen5 VCP input resolver
     │   └── MccsCapabilitiesParser.cs # VESA MCCS vcp(...) discrete capabilities parser
     ├── Native/
     │   └── NativeMethods.cs          # Win32 Dxva2.dll, User32.dll, and Graphics I2C error codes
     ├── Services/
-    │   ├── ConfigService.cs          # Atomic portable JSON config & optional startup entry
+    │   ├── ConfigService.cs          # Atomic portable JSON config & per-monitor profile store
     │   ├── DdcCiService.cs           # Serialized I2C bus engine, retry, and handle recovery
     │   ├── GlobalHotkeyManager.cs    # Win32 RegisterHotKey & WM_DISPLAYCHANGE hook
     │   └── MonitorDiscoveryService.cs# HMONITOR + PHYSICAL_MONITOR + Registry EDID correlation
@@ -66,7 +77,7 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 
 ## Command-Line Automation Flags
 
-`DisplayInputSwitcher.exe` also supports headless fast-switching flags:
+`DisplayInputSwitcher.exe` also supports headless fast-switching flags with automatic monitor scheme detection:
 
 ```powershell
 .\DisplayInputSwitcher.exe --hdmi                  # Switch target monitor to HDMI

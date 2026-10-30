@@ -83,14 +83,21 @@ namespace DisplayInputSwitcher.Core
             DiscreteValuesByVcp = new Dictionary<byte, List<byte>>();
         }
 
-        public List<byte> GetInputSelectValues()
+        public List<byte> GetValuesForVcp(byte vcpCode)
         {
             List<byte> vals;
-            if (DiscreteValuesByVcp.TryGetValue(0x60, out vals) && vals != null)
+            if (DiscreteValuesByVcp.TryGetValue(vcpCode, out vals) && vals != null)
             {
                 return new List<byte>(vals);
             }
             return new List<byte>();
+        }
+
+        public List<byte> GetInputSelectValues()
+        {
+            List<byte> v60 = GetValuesForVcp(0x60);
+            if (v60.Count > 0) return v60;
+            return GetValuesForVcp(0xF4);
         }
     }
 
@@ -105,10 +112,69 @@ namespace DisplayInputSwitcher.Core
         public bool WasOneByteMasked { get; set; }
     }
 
+    public sealed class DetectedInputOption
+    {
+        public uint Code { get; set; }
+        public string FriendlyName { get; set; }
+        public string ShortChipLabel { get; set; }
+        public bool IsHdmiFamily { get; set; }
+        public bool IsDpFamily { get; set; }
+
+        public DetectedInputOption()
+        {
+            FriendlyName = string.Empty;
+            ShortChipLabel = string.Empty;
+        }
+    }
+
+    public sealed class MonitorInputProfile
+    {
+        public byte InputVcpCode { get; set; }
+        public uint HdmiValue { get; set; }
+        public uint DpValue { get; set; }
+        public string HdmiLabel { get; set; }
+        public string DpLabel { get; set; }
+        public bool IsUserCustomized { get; set; }
+
+        public MonitorInputProfile()
+        {
+            InputVcpCode = 0x60;
+            HdmiValue = 1;
+            DpValue = 3;
+            HdmiLabel = "HDMI";
+            DpLabel = "DisplayPort";
+            IsUserCustomized = false;
+        }
+    }
+
+    public sealed class ResolvedMonitorInputMap
+    {
+        public byte InputVcpCode { get; set; }
+        public uint HdmiValue { get; set; }
+        public uint DpValue { get; set; }
+        public string HdmiLabel { get; set; }
+        public string DpLabel { get; set; }
+        public bool IsUserCustomized { get; set; }
+        public string DetectionSummary { get; set; }
+        public List<DetectedInputOption> DetectedOptions { get; private set; }
+
+        public ResolvedMonitorInputMap()
+        {
+            InputVcpCode = 0x60;
+            HdmiValue = 1;
+            DpValue = 3;
+            HdmiLabel = "HDMI";
+            DpLabel = "DisplayPort";
+            DetectionSummary = "Auto-Detect";
+            DetectedOptions = new List<DetectedInputOption>();
+        }
+    }
+
     public sealed class MonitorDeviceRecord : IDisposable
     {
         public IntPtr HMonitor { get; set; }
         public IntPtr PhysicalMonitorHandle { get; set; }
+        public bool HasPhysicalHandle { get; set; }
         public string GdiDisplayName { get; set; }
         public string MonitorDeviceName { get; set; }
         public string AdapterName { get; set; }
@@ -121,6 +187,7 @@ namespace DisplayInputSwitcher.Core
         public bool IsPrimary { get; set; }
 
         public MonitorCapabilities Capabilities { get; set; }
+        public byte PreferredInputVcpCode { get; set; }
         public bool SupportsInputSelect { get; set; }
         public bool SupportsBrightness { get; set; }
         public bool SupportsVolume { get; set; }
@@ -132,6 +199,8 @@ namespace DisplayInputSwitcher.Core
         public MonitorDeviceRecord(Action<IntPtr> destroyAction)
         {
             _destroyAction = destroyAction;
+            PhysicalMonitorHandle = new IntPtr(-1);
+            HasPhysicalHandle = false;
             GdiDisplayName = string.Empty;
             MonitorDeviceName = string.Empty;
             AdapterName = string.Empty;
@@ -141,6 +210,7 @@ namespace DisplayInputSwitcher.Core
             EdidMonitorName = string.Empty;
             EdidSerialNumber = string.Empty;
             ManufacturerCode = string.Empty;
+            PreferredInputVcpCode = 0x60;
         }
 
         public string FriendlyTitle
@@ -183,6 +253,10 @@ namespace DisplayInputSwitcher.Core
                 {
                     return "SN:" + EdidSerialNumber;
                 }
+                if (!string.IsNullOrEmpty(MonitorDeviceName) && !string.IsNullOrEmpty(ShortMonitorId))
+                {
+                    return "ID:" + ShortMonitorId + "@" + MonitorDeviceName;
+                }
                 if (!string.IsNullOrEmpty(MonitorDeviceName))
                 {
                     return "DEV:" + MonitorDeviceName;
@@ -219,17 +293,23 @@ namespace DisplayInputSwitcher.Core
         {
             if (_disposed) return;
             _disposed = true;
-            IntPtr h = PhysicalMonitorHandle;
-            PhysicalMonitorHandle = IntPtr.Zero;
-            if (h != IntPtr.Zero && _destroyAction != null)
+            // Note: Windows Dxva2.dll uses 0-based table indices (0x0, 0x1, ...) as PHYSICAL_MONITOR handles,
+            // so IntPtr.Zero IS a valid handle when HasPhysicalHandle is true.
+            if (HasPhysicalHandle)
             {
-                try
+                HasPhysicalHandle = false;
+                IntPtr h = PhysicalMonitorHandle;
+                PhysicalMonitorHandle = new IntPtr(-1);
+                if (_destroyAction != null)
                 {
-                    _destroyAction(h);
-                }
-                catch
-                {
-                    // Never throw during physical monitor cleanup.
+                    try
+                    {
+                        _destroyAction(h);
+                    }
+                    catch
+                    {
+                        // Never throw during physical monitor cleanup.
+                    }
                 }
             }
         }
@@ -237,8 +317,10 @@ namespace DisplayInputSwitcher.Core
 
     public sealed class MonitorLiveSnapshot
     {
+        public byte ActiveVcpCode { get; set; }
         public uint? CurrentInputValue { get; set; }
         public uint? RawInputValue { get; set; }
+        public uint? MaxInputValue { get; set; }
         public uint? Brightness { get; set; }
         public uint? BrightnessMax { get; set; }
         public uint? Volume { get; set; }
@@ -250,6 +332,7 @@ namespace DisplayInputSwitcher.Core
 
         public MonitorLiveSnapshot()
         {
+            ActiveVcpCode = 0x60;
             PossibleInputs = new List<byte>();
             StatusSummary = string.Empty;
         }
@@ -258,10 +341,7 @@ namespace DisplayInputSwitcher.Core
     public sealed class AppConfig
     {
         public string SelectedMonitorKey { get; set; }
-        public uint HdmiValue { get; set; }
-        public uint DpValue { get; set; }
-        public string HdmiLabel { get; set; }
-        public string DpLabel { get; set; }
+        public Dictionary<string, MonitorInputProfile> MonitorProfiles { get; set; }
         public bool UseOneByteInputMask { get; set; }
         public bool RetryOnI2cFailure { get; set; }
         public bool AlwaysOnTop { get; set; }
@@ -275,10 +355,7 @@ namespace DisplayInputSwitcher.Core
         public AppConfig()
         {
             SelectedMonitorKey = string.Empty;
-            HdmiValue = 1;
-            DpValue = 3;
-            HdmiLabel = "HDMI";
-            DpLabel = "DisplayPort";
+            MonitorProfiles = new Dictionary<string, MonitorInputProfile>(StringComparer.OrdinalIgnoreCase);
             UseOneByteInputMask = true;
             RetryOnI2cFailure = true;
             AlwaysOnTop = false;
@@ -291,4 +368,3 @@ namespace DisplayInputSwitcher.Core
         }
     }
 }
-

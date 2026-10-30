@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -82,6 +83,51 @@ namespace DisplayInputSwitcher.Services
             }
         }
 
+        public static MonitorInputProfile GetProfileForMonitor(AppConfig cfg, string monitorKey)
+        {
+            if (cfg == null || cfg.MonitorProfiles == null || string.IsNullOrWhiteSpace(monitorKey))
+            {
+                return null;
+            }
+            MonitorInputProfile prof;
+            if (cfg.MonitorProfiles.TryGetValue(monitorKey, out prof))
+            {
+                return prof;
+            }
+            return null;
+        }
+
+        public static void SaveCustomProfileForMonitor(
+            AppConfig cfg,
+            string monitorKey,
+            byte inputVcpCode,
+            uint hdmiValue,
+            uint dpValue,
+            string hdmiLabel,
+            string dpLabel)
+        {
+            if (cfg == null || string.IsNullOrWhiteSpace(monitorKey)) return;
+            if (cfg.MonitorProfiles == null)
+            {
+                cfg.MonitorProfiles = new Dictionary<string, MonitorInputProfile>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            MonitorInputProfile prof = new MonitorInputProfile();
+            prof.InputVcpCode = inputVcpCode != 0 ? inputVcpCode : (byte)0x60;
+            prof.HdmiValue = hdmiValue;
+            prof.DpValue = dpValue;
+            prof.HdmiLabel = string.IsNullOrWhiteSpace(hdmiLabel) ? "HDMI" : hdmiLabel.Trim();
+            prof.DpLabel = string.IsNullOrWhiteSpace(dpLabel) ? "DisplayPort" : dpLabel.Trim();
+            prof.IsUserCustomized = true;
+            cfg.MonitorProfiles[monitorKey] = prof;
+        }
+
+        public static void ClearCustomProfileForMonitor(AppConfig cfg, string monitorKey)
+        {
+            if (cfg == null || cfg.MonitorProfiles == null || string.IsNullOrWhiteSpace(monitorKey)) return;
+            cfg.MonitorProfiles.Remove(monitorKey);
+        }
+
         public bool IsLaunchAtStartupEnabled()
         {
             try
@@ -129,11 +175,27 @@ namespace DisplayInputSwitcher.Services
 
         private static AppConfig Sanitize(AppConfig cfg)
         {
-            if (cfg.HdmiValue > 255) cfg.HdmiValue = 1;
-            if (cfg.DpValue > 255) cfg.DpValue = 3;
-            if (string.IsNullOrWhiteSpace(cfg.HdmiLabel)) cfg.HdmiLabel = "HDMI";
-            if (string.IsNullOrWhiteSpace(cfg.DpLabel)) cfg.DpLabel = "DisplayPort";
             if (cfg.SelectedMonitorKey == null) cfg.SelectedMonitorKey = string.Empty;
+            if (cfg.MonitorProfiles == null)
+            {
+                cfg.MonitorProfiles = new Dictionary<string, MonitorInputProfile>(StringComparer.OrdinalIgnoreCase);
+            }
+            else
+            {
+                Dictionary<string, MonitorInputProfile> ci = new Dictionary<string, MonitorInputProfile>(StringComparer.OrdinalIgnoreCase);
+                foreach (KeyValuePair<string, MonitorInputProfile> kv in cfg.MonitorProfiles)
+                {
+                    if (!string.IsNullOrWhiteSpace(kv.Key) && kv.Value != null)
+                    {
+                        if (kv.Value.InputVcpCode == 0) kv.Value.InputVcpCode = 0x60;
+                        if (string.IsNullOrWhiteSpace(kv.Value.HdmiLabel)) kv.Value.HdmiLabel = "HDMI";
+                        if (string.IsNullOrWhiteSpace(kv.Value.DpLabel)) kv.Value.DpLabel = "DisplayPort";
+                        ci[kv.Key] = kv.Value;
+                    }
+                }
+                cfg.MonitorProfiles = ci;
+            }
+
             if (cfg.HdmiHotkey == null) cfg.HdmiHotkey = "Ctrl+Alt+1";
             if (cfg.DpHotkey == null) cfg.DpHotkey = "Ctrl+Alt+2";
             if (cfg.ToggleHotkey == null) cfg.ToggleHotkey = "Ctrl+Alt+S";
@@ -194,4 +256,3 @@ namespace DisplayInputSwitcher.Services
         }
     }
 }
-

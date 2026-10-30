@@ -13,12 +13,25 @@ $OutExe = Join-Path $DistDir "DisplayInputSwitcher.exe"
 
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
+# Gracefully stop any running tray instance locking dist\DisplayInputSwitcher.exe or Desktop\DisplayInputSwitcher.exe
+$WasRunning = $false
+$RunningProcs = Get-Process -Name "DisplayInputSwitcher" -ErrorAction SilentlyContinue
+if ($RunningProcs) {
+    $WasRunning = $true
+    Write-Host "[0/4] Stopping running DisplayInputSwitcher tray instance before rebuild..."
+    $RunningProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 350
+}
+
 if (-not (Test-Path $IconPath)) {
     Write-Host "[1/4] Generating multi-resolution icon..."
     python (Join-Path $ProjectRoot "scripts\generate_icon.py")
 }
 
 $FwDir = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319"
+if (-not (Test-Path $FwDir)) {
+    $FwDir = "C:\Windows\Microsoft.NET\Framework\v4.0.30319"
+}
 $WpfDir = Join-Path $FwDir "WPF"
 $Csc = Join-Path $FwDir "csc.exe"
 
@@ -28,11 +41,11 @@ if (-not (Test-Path $Csc)) {
 
 $Sources = Get-ChildItem -Path (Join-Path $ProjectRoot "src") -Recurse -Filter "*.cs" | Select-Object -ExpandProperty FullName
 
-Write-Host "[2/4] Compiling standalone portable DisplayInputSwitcher.exe (x64)..."
+Write-Host "[2/4] Compiling universal portable DisplayInputSwitcher.exe (AnyCPU: native x64 / ARM64 / x86)..."
 & $Csc `
     /nologo `
     /target:winexe `
-    /platform:x64 `
+    /platform:anycpu `
     /optimize+ `
     /out:$OutExe `
     /win32icon:$IconPath `
@@ -73,7 +86,11 @@ if (-not $SkipDesktopCopy) {
     $DesktopExe = Join-Path $DesktopDir "DisplayInputSwitcher.exe"
     Write-Host "[4/4] Copying verified portable .exe to Desktop: $DesktopExe"
     Copy-Item -Path $OutExe -Destination $DesktopExe -Force
+
+    if ($WasRunning) {
+        Write-Host "      Relaunching updated DisplayInputSwitcher.exe in System Tray..."
+        Start-Process -FilePath $DesktopExe -ArgumentList "--minimized" | Out-Null
+    }
 }
 
-Write-Host "SUCCESS! Portable DisplayInputSwitcher.exe is ready."
-
+Write-Host "SUCCESS! Universal Portable DisplayInputSwitcher.exe is ready."

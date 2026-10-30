@@ -29,20 +29,22 @@ namespace DisplayInputSwitcher.UI
         private AppConfig _config;
         private IReadOnlyList<MonitorDeviceRecord> _monitors = new List<MonitorDeviceRecord>();
         private MonitorDeviceRecord _selectedMonitor;
+        private ResolvedMonitorInputMap _activeMap = new ResolvedMonitorInputMap();
         private uint? _activeInputCode;
+        private uint? _activeMaxInputCode;
         private bool _isMuted;
         private bool _isSwitchingOrReading;
         private bool _settingsOpen;
         private bool _allowRealExit;
+        private Task _initialLoadTask;
 
-        // Debounce timers
         private readonly DispatcherTimer _brightnessDebounce;
         private readonly DispatcherTimer _volumeDebounce;
         private readonly DispatcherTimer _displayChangeDebounce;
         private uint? _pendingBrightness;
         private uint? _pendingVolume;
 
-        // UI Elements
+        // Toolbar & Header
         private Border _pinButton;
         private TextBlock _pinGlyph;
         private Border _settingsButton;
@@ -50,13 +52,14 @@ namespace DisplayInputSwitcher.UI
         private Ellipse _liveBadgeDot;
         private TextBlock _liveBadgeText;
 
+        // Monitor Selector
         private Border _monitorSelectorBtn;
         private TextBlock _monitorTitleText;
         private TextBlock _monitorSubText;
         private Popup _monitorDropdownPopup;
         private StackPanel _monitorDropdownList;
 
-        // Dual Input Cards
+        // Dual Hero Input Cards
         private Border _hdmiCard;
         private TextBlock _hdmiCardTitle;
         private TextBlock _hdmiCodeBadge;
@@ -70,6 +73,10 @@ namespace DisplayInputSwitcher.UI
         private Border _dpActivePill;
         private TextBlock _dpActivePillText;
         private TextBlock _dpHotkeyHint;
+
+        // Dynamic Multi-Port Chips Bar (auto-shown when monitor has 3+ inputs like HDMI 1, HDMI 2, DP, USB-C)
+        private Border _extraPortsContainer;
+        private WrapPanel _extraPortsWrap;
 
         private TextBlock _toggleBtnLabel;
         private TextBlock _toggleBtnHotkey;
@@ -88,6 +95,8 @@ namespace DisplayInputSwitcher.UI
 
         // Settings Drawer
         private Border _settingsDrawerContent;
+        private TextBlock _schemeBadgeText;
+        private TextBox _vcpHexInput;
         private TextBox _hdmiCodeInput;
         private TextBox _dpCodeInput;
         private TextBlock _possibleValuesHint;
@@ -131,16 +140,13 @@ namespace DisplayInputSwitcher.UI
             UseLayoutRounding = true;
             SnapsToDevicePixels = true;
 
-            _brightnessDebounce = new DispatcherTimer();
-            _brightnessDebounce.Interval = TimeSpan.FromMilliseconds(130);
+            _brightnessDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(130) };
             _brightnessDebounce.Tick += OnBrightnessDebounceTick;
 
-            _volumeDebounce = new DispatcherTimer();
-            _volumeDebounce.Interval = TimeSpan.FromMilliseconds(130);
+            _volumeDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(130) };
             _volumeDebounce.Tick += OnVolumeDebounceTick;
 
-            _displayChangeDebounce = new DispatcherTimer();
-            _displayChangeDebounce.Interval = TimeSpan.FromMilliseconds(750);
+            _displayChangeDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(750) };
             _displayChangeDebounce.Tick += OnDisplayChangeDebounceTick;
 
             Content = BuildRootVisual();
@@ -150,9 +156,10 @@ namespace DisplayInputSwitcher.UI
             SystemEvents.PowerModeChanged += OnSystemPowerModeChanged;
 
             _trayManager.OpenWindowRequested += RestoreAndActivateWindow;
-            _trayManager.SwitchHdmiRequested += delegate { TriggerSwitchToInput(_config.HdmiValue, _config.HdmiLabel); };
-            _trayManager.SwitchDpRequested += delegate { TriggerSwitchToInput(_config.DpValue, _config.DpLabel); };
+            _trayManager.SwitchHdmiRequested += delegate { TriggerSwitchToInput(_activeMap.HdmiValue, _activeMap.HdmiLabel); };
+            _trayManager.SwitchDpRequested += delegate { TriggerSwitchToInput(_activeMap.DpValue, _activeMap.DpLabel); };
             _trayManager.ToggleInputRequested += TriggerToggleInput;
+            _trayManager.SwitchSpecificCodeRequested += TriggerSwitchToInput;
             _trayManager.ToggleAlwaysOnTopRequested += ToggleAlwaysOnTop;
             _trayManager.ExitRequested += RequestRealExit;
 
@@ -160,10 +167,8 @@ namespace DisplayInputSwitcher.UI
             Closing += OnWindowClosing;
             Closed += OnWindowClosed;
 
-            ApplyConfigToUi();
+            ApplyResolvedMapAndConfigToUi();
         }
-
-        private Task _initialLoadTask;
 
         public void InitializeHardwareAndHotkeys()
         {
@@ -189,18 +194,18 @@ namespace DisplayInputSwitcher.UI
             cardBg.GradientStops.Add(new GradientStop(ColorFromHex("#11192E"), 1.0));
             outerCard.Background = cardBg;
 
-            DropShadowEffect shadow = new DropShadowEffect();
-            shadow.BlurRadius = 22;
-            shadow.ShadowDepth = 4;
-            shadow.Direction = 270;
-            shadow.Color = Colors.Black;
-            shadow.Opacity = 0.62;
-            outerCard.Effect = shadow;
+            outerCard.Effect = new DropShadowEffect
+            {
+                BlurRadius = 22,
+                ShadowDepth = 4,
+                Direction = 270,
+                Color = Colors.Black,
+                Opacity = 0.62
+            };
 
             StackPanel mainStack = new StackPanel();
             mainStack.Orientation = Orientation.Vertical;
 
-            // Top luminous gradient accent line inset cleanly within rounded bezel
             Border topAccent = new Border();
             topAccent.Height = 2.5;
             topAccent.Margin = new Thickness(16, 0, 16, 0);
@@ -214,13 +219,13 @@ namespace DisplayInputSwitcher.UI
             topAccent.Background = accentGrad;
             mainStack.Children.Add(topAccent);
 
-            // Body container
             StackPanel body = new StackPanel();
             body.Margin = new Thickness(16, 12, 16, 12);
 
             body.Children.Add(BuildTitleBar());
             body.Children.Add(BuildMonitorSelectorSection());
             body.Children.Add(BuildDualInputCardsSection());
+            body.Children.Add(BuildExtraPortsBarSection());
             body.Children.Add(BuildQuickToggleButton());
             body.Children.Add(BuildQuickControlsSection());
             body.Children.Add(BuildSettingsSection());
@@ -247,58 +252,64 @@ namespace DisplayInputSwitcher.UI
             bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            // Left: App badge + Title + Live pill
-            StackPanel left = new StackPanel();
-            left.Orientation = Orientation.Horizontal;
-            left.VerticalAlignment = VerticalAlignment.Center;
+            StackPanel left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
 
-            Border logoPill = new Border();
-            logoPill.Width = 26;
-            logoPill.Height = 26;
-            logoPill.CornerRadius = new CornerRadius(7);
-            logoPill.Background = new LinearGradientBrush(ColorFromHex("#0E7490"), ColorFromHex("#4F46E5"), 45.0);
-            logoPill.Margin = new Thickness(0, 0, 9, 0);
-            Path logoPath = new Path();
-            logoPath.Data = Geometry.Parse("M 4,6 L 20,6 L 20,16 L 4,16 Z M 9,19 L 15,19 M 12,16 L 12,19");
-            logoPath.Stroke = Brushes.White;
-            logoPath.StrokeThickness = 1.6;
-            logoPath.HorizontalAlignment = HorizontalAlignment.Center;
-            logoPath.VerticalAlignment = VerticalAlignment.Center;
+            Border logoPill = new Border
+            {
+                Width = 26,
+                Height = 26,
+                CornerRadius = new CornerRadius(7),
+                Background = new LinearGradientBrush(ColorFromHex("#0E7490"), ColorFromHex("#4F46E5"), 45.0),
+                Margin = new Thickness(0, 0, 9, 0)
+            };
+            Path logoPath = new Path
+            {
+                Data = Geometry.Parse("M 4,6 L 20,6 L 20,16 L 4,16 Z M 9,19 L 15,19 M 12,16 L 12,19"),
+                Stroke = Brushes.White,
+                StrokeThickness = 1.6,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
             logoPill.Child = logoPath;
             left.Children.Add(logoPill);
 
-            TextBlock titleText = new TextBlock();
-            titleText.Text = "Input Switcher";
-            titleText.Foreground = BrushFromHex("#F8FAFC");
-            titleText.FontFamily = new FontFamily("Segoe UI Semibold");
-            titleText.FontSize = 13.5;
-            titleText.VerticalAlignment = VerticalAlignment.Center;
+            TextBlock titleText = new TextBlock
+            {
+                Text = "Input Switcher",
+                Foreground = BrushFromHex("#F8FAFC"),
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                FontSize = 13.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
             left.Children.Add(titleText);
 
-            _liveBadgeBorder = new Border();
-            _liveBadgeBorder.CornerRadius = new CornerRadius(9);
-            _liveBadgeBorder.Background = BrushFromHex("#0F2922");
-            _liveBadgeBorder.BorderBrush = BrushFromHex("#10B981");
-            _liveBadgeBorder.BorderThickness = new Thickness(1);
-            _liveBadgeBorder.Padding = new Thickness(7, 2, 7, 2);
-            _liveBadgeBorder.Margin = new Thickness(8, 0, 0, 0);
-            _liveBadgeBorder.VerticalAlignment = VerticalAlignment.Center;
+            _liveBadgeBorder = new Border
+            {
+                CornerRadius = new CornerRadius(9),
+                Background = BrushFromHex("#0F2922"),
+                BorderBrush = BrushFromHex("#10B981"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(7, 2, 7, 2),
+                Margin = new Thickness(8, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
 
-            StackPanel badgeStack = new StackPanel();
-            badgeStack.Orientation = Orientation.Horizontal;
-            _liveBadgeDot = new Ellipse();
-            _liveBadgeDot.Width = 6;
-            _liveBadgeDot.Height = 6;
-            _liveBadgeDot.Fill = BrushFromHex("#34D399");
-            _liveBadgeDot.VerticalAlignment = VerticalAlignment.Center;
-            _liveBadgeDot.Margin = new Thickness(0, 0, 5, 0);
-
-            _liveBadgeText = new TextBlock();
-            _liveBadgeText.Text = "DDC/CI";
-            _liveBadgeText.FontSize = 9.5;
-            _liveBadgeText.FontFamily = new FontFamily("Segoe UI Semibold");
-            _liveBadgeText.Foreground = BrushFromHex("#6EE7B7");
-
+            StackPanel badgeStack = new StackPanel { Orientation = Orientation.Horizontal };
+            _liveBadgeDot = new Ellipse
+            {
+                Width = 6,
+                Height = 6,
+                Fill = BrushFromHex("#34D399"),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 5, 0)
+            };
+            _liveBadgeText = new TextBlock
+            {
+                Text = "DDC/CI",
+                FontSize = 9.5,
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                Foreground = BrushFromHex("#6EE7B7")
+            };
             badgeStack.Children.Add(_liveBadgeDot);
             badgeStack.Children.Add(_liveBadgeText);
             _liveBadgeBorder.Child = badgeStack;
@@ -307,18 +318,15 @@ namespace DisplayInputSwitcher.UI
             Grid.SetColumn(left, 0);
             bar.Children.Add(left);
 
-            // Right: Window tool buttons (Pin, Refresh, Settings, Minimize, Close)
-            StackPanel right = new StackPanel();
-            right.Orientation = Orientation.Horizontal;
-            right.VerticalAlignment = VerticalAlignment.Center;
+            StackPanel right = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
 
             _pinButton = CreateIconToolbarButton("📌", "Always on Top", out _pinGlyph, ToggleAlwaysOnTop, false);
             TextBlock dummy;
-            Border refreshBtn = CreateIconToolbarButton("↻", "Refresh Monitor State (F5)", out dummy, delegate
+            Border refreshBtn = CreateIconToolbarButton("↻", "Refresh Monitors & DDC/CI (F5)", out dummy, delegate
             {
                 Task ignored = RefreshMonitorsAndLiveStateAsync(true);
             }, false);
-            _settingsButton = CreateIconToolbarButton("⚙", "Settings & Hotkeys", out dummy, ToggleSettingsDrawer, false);
+            _settingsButton = CreateIconToolbarButton("⚙", "Monitor Codes, Presets & Hotkeys", out dummy, ToggleSettingsDrawer, false);
             Border minBtn = CreateIconToolbarButton("—", "Minimize", out dummy, delegate
             {
                 WindowState = WindowState.Minimized;
@@ -341,21 +349,25 @@ namespace DisplayInputSwitcher.UI
 
         private Border CreateIconToolbarButton(string symbol, string tooltip, out TextBlock glyphOut, Action onClick, bool isDangerHover)
         {
-            Border b = new Border();
-            b.Width = 26;
-            b.Height = 26;
-            b.CornerRadius = new CornerRadius(7);
-            b.Background = Brushes.Transparent;
-            b.Margin = new Thickness(2, 0, 0, 0);
-            b.Cursor = Cursors.Hand;
-            b.ToolTip = tooltip;
+            Border b = new Border
+            {
+                Width = 26,
+                Height = 26,
+                CornerRadius = new CornerRadius(7),
+                Background = Brushes.Transparent,
+                Margin = new Thickness(2, 0, 0, 0),
+                Cursor = Cursors.Hand,
+                ToolTip = tooltip
+            };
 
-            TextBlock t = new TextBlock();
-            t.Text = symbol;
-            t.FontSize = 11.5;
-            t.Foreground = BrushFromHex("#94A3B8");
-            t.HorizontalAlignment = HorizontalAlignment.Center;
-            t.VerticalAlignment = VerticalAlignment.Center;
+            TextBlock t = new TextBlock
+            {
+                Text = symbol,
+                FontSize = 11.5,
+                Foreground = BrushFromHex("#94A3B8"),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
             b.Child = t;
             glyphOut = t;
 
@@ -384,51 +396,55 @@ namespace DisplayInputSwitcher.UI
 
         private UIElement BuildMonitorSelectorSection()
         {
-            Grid wrap = new Grid();
-            wrap.Margin = new Thickness(0, 0, 0, 12);
+            Grid wrap = new Grid { Margin = new Thickness(0, 0, 0, 12) };
 
-            _monitorSelectorBtn = new Border();
-            _monitorSelectorBtn.CornerRadius = new CornerRadius(10);
-            _monitorSelectorBtn.Background = BrushFromHex("#131D31");
-            _monitorSelectorBtn.BorderBrush = BrushFromHex("#24324A");
-            _monitorSelectorBtn.BorderThickness = new Thickness(1);
-            _monitorSelectorBtn.Padding = new Thickness(11, 8, 11, 8);
-            _monitorSelectorBtn.Cursor = Cursors.Hand;
-            _monitorSelectorBtn.ToolTip = "Click to switch target monitor";
+            _monitorSelectorBtn = new Border
+            {
+                CornerRadius = new CornerRadius(10),
+                Background = BrushFromHex("#131D31"),
+                BorderBrush = BrushFromHex("#24324A"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(11, 8, 11, 8),
+                Cursor = Cursors.Hand,
+                ToolTip = "Click to select among connected monitors"
+            };
 
             Grid inner = new Grid();
             inner.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             inner.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
             StackPanel textCol = new StackPanel();
-            _monitorTitleText = new TextBlock();
-            _monitorTitleText.Text = "Scanning DDC/CI Monitors...";
-            _monitorTitleText.Foreground = BrushFromHex("#F1F5F9");
-            _monitorTitleText.FontFamily = new FontFamily("Segoe UI Semibold");
-            _monitorTitleText.FontSize = 12.2;
-            _monitorTitleText.TextTrimming = TextTrimming.CharacterEllipsis;
-
-            _monitorSubText = new TextBlock();
-            _monitorSubText.Text = "Querying Dxva2 & EDID metadata...";
-            _monitorSubText.Foreground = BrushFromHex("#64748B");
-            _monitorSubText.FontSize = 10.2;
-            _monitorSubText.Margin = new Thickness(0, 1, 0, 0);
-            _monitorSubText.TextTrimming = TextTrimming.CharacterEllipsis;
-
+            _monitorTitleText = new TextBlock
+            {
+                Text = "Scanning DDC/CI Monitors...",
+                Foreground = BrushFromHex("#F1F5F9"),
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                FontSize = 12.2,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            _monitorSubText = new TextBlock
+            {
+                Text = "Auto-detecting EDID & VCP 60 profile...",
+                Foreground = BrushFromHex("#64748B"),
+                FontSize = 10.2,
+                Margin = new Thickness(0, 1, 0, 0),
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
             textCol.Children.Add(_monitorTitleText);
             textCol.Children.Add(_monitorSubText);
             Grid.SetColumn(textCol, 0);
             inner.Children.Add(textCol);
 
-            TextBlock chev = new TextBlock();
-            chev.Text = "▾";
-            chev.Foreground = BrushFromHex("#64748B");
-            chev.FontSize = 13;
-            chev.VerticalAlignment = VerticalAlignment.Center;
-            chev.Margin = new Thickness(8, 0, 2, 0);
+            TextBlock chev = new TextBlock
+            {
+                Text = "▾",
+                Foreground = BrushFromHex("#64748B"),
+                FontSize = 13,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(8, 0, 2, 0)
+            };
             Grid.SetColumn(chev, 1);
             inner.Children.Add(chev);
-
             _monitorSelectorBtn.Child = inner;
 
             _monitorSelectorBtn.MouseEnter += delegate
@@ -442,29 +458,25 @@ namespace DisplayInputSwitcher.UI
                 _monitorSelectorBtn.Background = BrushFromHex("#131D31");
             };
 
-            // Custom dark Popup list so there is zero white Aero ComboBox chrome
-            _monitorDropdownPopup = new Popup();
-            _monitorDropdownPopup.PlacementTarget = _monitorSelectorBtn;
-            _monitorDropdownPopup.Placement = PlacementMode.Bottom;
-            _monitorDropdownPopup.StaysOpen = false;
-            _monitorDropdownPopup.AllowsTransparency = true;
-            _monitorDropdownPopup.VerticalOffset = 4;
-
-            Border popupBorder = new Border();
-            popupBorder.Width = 352;
-            popupBorder.CornerRadius = new CornerRadius(10);
-            popupBorder.Background = BrushFromHex("#0F172A");
-            popupBorder.BorderBrush = BrushFromHex("#334155");
-            popupBorder.BorderThickness = new Thickness(1);
-            popupBorder.Padding = new Thickness(5);
-            popupBorder.Effect = new DropShadowEffect
+            _monitorDropdownPopup = new Popup
             {
-                BlurRadius = 16,
-                ShadowDepth = 3,
-                Color = Colors.Black,
-                Opacity = 0.65
+                PlacementTarget = _monitorSelectorBtn,
+                Placement = PlacementMode.Bottom,
+                StaysOpen = false,
+                AllowsTransparency = true,
+                VerticalOffset = 4
             };
 
+            Border popupBorder = new Border
+            {
+                Width = 352,
+                CornerRadius = new CornerRadius(10),
+                Background = BrushFromHex("#0F172A"),
+                BorderBrush = BrushFromHex("#334155"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(5),
+                Effect = new DropShadowEffect { BlurRadius = 16, ShadowDepth = 3, Color = Colors.Black, Opacity = 0.65 }
+            };
             _monitorDropdownList = new StackPanel();
             popupBorder.Child = _monitorDropdownList;
             _monitorDropdownPopup.Child = popupBorder;
@@ -490,26 +502,30 @@ namespace DisplayInputSwitcher.UI
                 MonitorDeviceRecord m = _monitors[i];
                 bool isSel = (_selectedMonitor != null && m.StableSelectionKey == _selectedMonitor.StableSelectionKey);
 
-                Border item = new Border();
-                item.CornerRadius = new CornerRadius(7);
-                item.Padding = new Thickness(10, 7, 10, 7);
-                item.Margin = new Thickness(0, 1, 0, 1);
-                item.Cursor = Cursors.Hand;
-                item.Background = isSel ? BrushFromHex("#1E293B") : Brushes.Transparent;
+                Border item = new Border
+                {
+                    CornerRadius = new CornerRadius(7),
+                    Padding = new Thickness(10, 7, 10, 7),
+                    Margin = new Thickness(0, 1, 0, 1),
+                    Cursor = Cursors.Hand,
+                    Background = isSel ? BrushFromHex("#1E293B") : Brushes.Transparent
+                };
 
                 StackPanel sp = new StackPanel();
-                TextBlock l1 = new TextBlock();
-                l1.Text = (isSel ? "●  " : "○  ") + m.DropdownLabel;
-                l1.Foreground = isSel ? BrushFromHex("#38BDF8") : BrushFromHex("#F1F5F9");
-                l1.FontFamily = new FontFamily("Segoe UI Semibold");
-                l1.FontSize = 11.5;
-
-                TextBlock l2 = new TextBlock();
-                string ddcTag = m.SupportsInputSelect ? "DDC/CI Input Select Ready" : "Read-only / Internal Panel";
-                l2.Text = string.Format("     {0} • {1}", string.IsNullOrEmpty(m.AdapterName) ? m.MonitorDeviceName : m.AdapterName, ddcTag);
-                l2.Foreground = BrushFromHex("#64748B");
-                l2.FontSize = 10;
-
+                TextBlock l1 = new TextBlock
+                {
+                    Text = (isSel ? "●  " : "○  ") + m.DropdownLabel,
+                    Foreground = isSel ? BrushFromHex("#38BDF8") : BrushFromHex("#F1F5F9"),
+                    FontFamily = new FontFamily("Segoe UI Semibold"),
+                    FontSize = 11.5
+                };
+                string ddcTag = m.SupportsInputSelect ? "DDC/CI Input Switch Ready" : "Internal / Non-DDC Panel";
+                TextBlock l2 = new TextBlock
+                {
+                    Text = string.Format("     {0} • {1}", string.IsNullOrEmpty(m.AdapterName) ? m.MonitorDeviceName : m.AdapterName, ddcTag),
+                    Foreground = BrushFromHex("#64748B"),
+                    FontSize = 10
+                };
                 sp.Children.Add(l1);
                 sp.Children.Add(l2);
                 item.Child = sp;
@@ -530,13 +546,11 @@ namespace DisplayInputSwitcher.UI
 
         private UIElement BuildDualInputCardsSection()
         {
-            Grid grid = new Grid();
-            grid.Margin = new Thickness(0, 0, 0, 10);
+            Grid grid = new Grid { Margin = new Thickness(0, 0, 0, 10) };
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-            // Left: HDMI Hero Card
             _hdmiCard = BuildSingleInputCard(
                 true,
                 "M 3,6 L 25,6 L 25,13 L 22,16 L 6,16 L 3,13 Z M 7,10 L 21,10",
@@ -545,29 +559,31 @@ namespace DisplayInputSwitcher.UI
                 out _hdmiActivePill,
                 out _hdmiActivePillText,
                 out _hdmiHotkeyHint,
-                delegate { TriggerSwitchToInput(_config.HdmiValue, _config.HdmiLabel); });
+                delegate { TriggerSwitchToInput(_activeMap.HdmiValue, _activeMap.HdmiLabel); });
             Grid.SetColumn(_hdmiCard, 0);
             grid.Children.Add(_hdmiCard);
 
-            // Center: 1-Click Swap Values button (1 <-> 3)
-            Border swapBtn = new Border();
-            swapBtn.Width = 30;
-            swapBtn.Height = 30;
-            swapBtn.CornerRadius = new CornerRadius(15);
-            swapBtn.Background = BrushFromHex("#162136");
-            swapBtn.BorderBrush = BrushFromHex("#2E405E");
-            swapBtn.BorderThickness = new Thickness(1);
-            swapBtn.Margin = new Thickness(7, 0, 7, 0);
-            swapBtn.VerticalAlignment = VerticalAlignment.Center;
-            swapBtn.Cursor = Cursors.Hand;
-            swapBtn.ToolTip = "1-Click Swap HDMI & DisplayPort Values (1 ⇄ 3)";
-
-            TextBlock swapIcon = new TextBlock();
-            swapIcon.Text = "⇄";
-            swapIcon.FontSize = 13.5;
-            swapIcon.Foreground = BrushFromHex("#94A3B8");
-            swapIcon.HorizontalAlignment = HorizontalAlignment.Center;
-            swapIcon.VerticalAlignment = VerticalAlignment.Center;
+            Border swapBtn = new Border
+            {
+                Width = 30,
+                Height = 30,
+                CornerRadius = new CornerRadius(15),
+                Background = BrushFromHex("#162136"),
+                BorderBrush = BrushFromHex("#2E405E"),
+                BorderThickness = new Thickness(1),
+                Margin = new Thickness(7, 0, 7, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Cursor = Cursors.Hand,
+                ToolTip = "1-Click Swap HDMI & DisplayPort Codes for this monitor"
+            };
+            TextBlock swapIcon = new TextBlock
+            {
+                Text = "⇄",
+                FontSize = 13.5,
+                Foreground = BrushFromHex("#94A3B8"),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
             swapBtn.Child = swapIcon;
 
             swapBtn.MouseEnter += delegate
@@ -582,12 +598,11 @@ namespace DisplayInputSwitcher.UI
                 swapBtn.BorderBrush = BrushFromHex("#2E405E");
                 swapIcon.Foreground = BrushFromHex("#94A3B8");
             };
-            swapBtn.MouseLeftButtonUp += delegate { SwapHdmiAndDpValues(); };
+            swapBtn.MouseLeftButtonUp += delegate { SwapCurrentMonitorHdmiAndDp(); };
 
             Grid.SetColumn(swapBtn, 1);
             grid.Children.Add(swapBtn);
 
-            // Right: DisplayPort Hero Card
             _dpCard = BuildSingleInputCard(
                 false,
                 "M 3,6 L 21,6 L 25,10 L 25,16 L 3,16 Z M 8,11 L 19,11",
@@ -596,7 +611,7 @@ namespace DisplayInputSwitcher.UI
                 out _dpActivePill,
                 out _dpActivePillText,
                 out _dpHotkeyHint,
-                delegate { TriggerSwitchToInput(_config.DpValue, _config.DpLabel); });
+                delegate { TriggerSwitchToInput(_activeMap.DpValue, _activeMap.DpLabel); });
             Grid.SetColumn(_dpCard, 2);
             grid.Children.Add(_dpCard);
 
@@ -613,87 +628,87 @@ namespace DisplayInputSwitcher.UI
             out TextBlock hotkeyOut,
             Action onClick)
         {
-            Border card = new Border();
-            card.CornerRadius = new CornerRadius(13);
-            card.BorderThickness = new Thickness(1.5);
-            card.BorderBrush = BrushFromHex("#233047");
-            card.Background = BrushFromHex("#131D31");
-            card.Padding = new Thickness(12, 12, 12, 11);
-            card.Cursor = Cursors.Hand;
+            Border card = new Border
+            {
+                CornerRadius = new CornerRadius(13),
+                BorderThickness = new Thickness(1.5),
+                BorderBrush = BrushFromHex("#233047"),
+                Background = BrushFromHex("#131D31"),
+                Padding = new Thickness(12, 12, 12, 11),
+                Cursor = Cursors.Hand
+            };
 
-            StackPanel stack = new StackPanel();
-            stack.HorizontalAlignment = HorizontalAlignment.Center;
+            StackPanel stack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
 
-            // Top Active Status Pill
-            Border pill = new Border();
-            pill.CornerRadius = new CornerRadius(8);
-            pill.Padding = new Thickness(8, 2, 8, 2);
-            pill.HorizontalAlignment = HorizontalAlignment.Center;
-            pill.Margin = new Thickness(0, 0, 0, 9);
-            pill.Background = BrushFromHex("#1E293B");
-
-            TextBlock pillText = new TextBlock();
-            pillText.Text = "STANDBY";
-            pillText.FontSize = 9.5;
-            pillText.FontFamily = new FontFamily("Segoe UI Semibold");
-            pillText.Foreground = BrushFromHex("#64748B");
+            Border pill = new Border
+            {
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(8, 2, 8, 2),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 9),
+                Background = BrushFromHex("#1E293B")
+            };
+            TextBlock pillText = new TextBlock
+            {
+                Text = "SWITCH TO",
+                FontSize = 9.5,
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                Foreground = BrushFromHex("#64748B")
+            };
             pill.Child = pillText;
             stack.Children.Add(pill);
 
-            // Connector Vector Icon
-            Path portIcon = new Path();
-            portIcon.Data = Geometry.Parse(portVectorData);
-            portIcon.Stroke = isHdmiSlot ? BrushFromHex("#22D3EE") : BrushFromHex("#A78BFA");
-            portIcon.StrokeThickness = 1.9;
-            portIcon.HorizontalAlignment = HorizontalAlignment.Center;
-            portIcon.Margin = new Thickness(0, 0, 0, 7);
+            Path portIcon = new Path
+            {
+                Data = Geometry.Parse(portVectorData),
+                Stroke = isHdmiSlot ? BrushFromHex("#22D3EE") : BrushFromHex("#A78BFA"),
+                StrokeThickness = 1.9,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 7)
+            };
             stack.Children.Add(portIcon);
 
-            // Port Name ("HDMI" / "DisplayPort")
-            TextBlock title = new TextBlock();
-            title.Text = isHdmiSlot ? "HDMI" : "DisplayPort";
-            title.FontFamily = new FontFamily("Segoe UI Semibold");
-            title.FontSize = 15;
-            title.Foreground = BrushFromHex("#F8FAFC");
-            title.HorizontalAlignment = HorizontalAlignment.Center;
+            TextBlock title = new TextBlock
+            {
+                Text = isHdmiSlot ? "HDMI" : "DisplayPort",
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                FontSize = 15,
+                Foreground = BrushFromHex("#F8FAFC"),
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
             stack.Children.Add(title);
 
-            // VCP 60 Code Badge
-            TextBlock codeBadge = new TextBlock();
-            codeBadge.Text = isHdmiSlot ? "VCP 60 = 1" : "VCP 60 = 3";
-            codeBadge.FontSize = 10.5;
-            codeBadge.Foreground = BrushFromHex("#94A3B8");
-            codeBadge.HorizontalAlignment = HorizontalAlignment.Center;
-            codeBadge.Margin = new Thickness(0, 2, 0, 5);
+            TextBlock codeBadge = new TextBlock
+            {
+                Text = isHdmiSlot ? "VCP 60 • Code 1" : "VCP 60 • Code 3",
+                FontSize = 10.5,
+                Foreground = BrushFromHex("#94A3B8"),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 2, 0, 5)
+            };
             stack.Children.Add(codeBadge);
 
-            // Global Hotkey Hint
-            TextBlock hkHint = new TextBlock();
-            hkHint.Text = isHdmiSlot ? "Ctrl+Alt+1" : "Ctrl+Alt+2";
-            hkHint.FontSize = 9.5;
-            hkHint.Foreground = BrushFromHex("#475569");
-            hkHint.HorizontalAlignment = HorizontalAlignment.Center;
+            TextBlock hkHint = new TextBlock
+            {
+                Text = isHdmiSlot ? "Ctrl+Alt+1" : "Ctrl+Alt+2",
+                FontSize = 9.5,
+                Foreground = BrushFromHex("#475569"),
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
             stack.Children.Add(hkHint);
 
             card.Child = stack;
 
             card.MouseEnter += delegate
             {
-                bool active = IsSlotCurrentlyActive(isHdmiSlot);
-                if (!active)
+                if (!IsSlotCurrentlyActive(isHdmiSlot))
                 {
                     card.Background = BrushFromHex("#192640");
                     card.BorderBrush = isHdmiSlot ? BrushFromHex("#0891B2") : BrushFromHex("#7C3AED");
                 }
             };
-            card.MouseLeave += delegate
-            {
-                UpdateInputCardsVisualState();
-            };
-            card.MouseLeftButtonUp += delegate
-            {
-                if (onClick != null) onClick();
-            };
+            card.MouseLeave += delegate { UpdateInputCardsVisualState(); };
+            card.MouseLeftButtonUp += delegate { if (onClick != null) onClick(); };
 
             titleOut = title;
             codeOut = codeBadge;
@@ -703,15 +718,81 @@ namespace DisplayInputSwitcher.UI
             return card;
         }
 
+        private UIElement BuildExtraPortsBarSection()
+        {
+            _extraPortsContainer = new Border
+            {
+                CornerRadius = new CornerRadius(9),
+                Background = BrushFromHex("#111A2C"),
+                BorderBrush = BrushFromHex("#1E293B"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(8, 6, 8, 6),
+                Margin = new Thickness(0, 0, 0, 10),
+                Visibility = Visibility.Collapsed
+            };
+
+            _extraPortsWrap = new WrapPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            _extraPortsContainer.Child = _extraPortsWrap;
+            return _extraPortsContainer;
+        }
+
+        private void RebuildExtraPortsChips()
+        {
+            _extraPortsWrap.Children.Clear();
+            if (_activeMap == null || _activeMap.DetectedOptions == null || _activeMap.DetectedOptions.Count <= 2)
+            {
+                _extraPortsContainer.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            _extraPortsContainer.Visibility = Visibility.Visible;
+            for (int i = 0; i < _activeMap.DetectedOptions.Count; i++)
+            {
+                DetectedInputOption opt = _activeMap.DetectedOptions[i];
+                bool isActive = _activeInputCode.HasValue && _activeInputCode.Value == opt.Code;
+
+                Border chip = new Border
+                {
+                    CornerRadius = new CornerRadius(6),
+                    Padding = new Thickness(8, 3, 8, 3),
+                    Margin = new Thickness(3, 2, 3, 2),
+                    Cursor = Cursors.Hand,
+                    BorderThickness = new Thickness(1),
+                    Background = isActive ? BrushFromHex("#0E3A4C") : BrushFromHex("#162136"),
+                    BorderBrush = isActive ? BrushFromHex("#22D3EE") : BrushFromHex("#2A3A54")
+                };
+
+                TextBlock t = new TextBlock
+                {
+                    Text = (isActive ? "● " : "") + opt.ShortChipLabel,
+                    FontSize = 10,
+                    FontFamily = new FontFamily("Segoe UI Semibold"),
+                    Foreground = isActive ? BrushFromHex("#67E8F9") : BrushFromHex("#CBD5E1")
+                };
+                chip.Child = t;
+
+                uint capCode = opt.Code;
+                string capName = opt.FriendlyName;
+                chip.MouseLeftButtonUp += delegate { TriggerSwitchToInput(capCode, capName); };
+                _extraPortsWrap.Children.Add(chip);
+            }
+        }
+
         private UIElement BuildQuickToggleButton()
         {
-            Border btn = new Border();
-            btn.CornerRadius = new CornerRadius(10);
-            btn.BorderThickness = new Thickness(1);
-            btn.BorderBrush = BrushFromHex("#2E3E5C");
-            btn.Padding = new Thickness(12, 8, 12, 8);
-            btn.Margin = new Thickness(0, 0, 0, 10);
-            btn.Cursor = Cursors.Hand;
+            Border btn = new Border
+            {
+                CornerRadius = new CornerRadius(10),
+                BorderThickness = new Thickness(1),
+                BorderBrush = BrushFromHex("#2E3E5C"),
+                Padding = new Thickness(12, 8, 12, 8),
+                Margin = new Thickness(0, 0, 0, 10),
+                Cursor = Cursors.Hand
+            };
 
             LinearGradientBrush bg = new LinearGradientBrush(ColorFromHex("#162238"), ColorFromHex("#1D2844"), 0.0);
             btn.Background = bg;
@@ -720,20 +801,24 @@ namespace DisplayInputSwitcher.UI
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            _toggleBtnLabel = new TextBlock();
-            _toggleBtnLabel.Text = "⇄   Quick Toggle Input (HDMI ⇄ DisplayPort)";
-            _toggleBtnLabel.Foreground = BrushFromHex("#E2E8F0");
-            _toggleBtnLabel.FontFamily = new FontFamily("Segoe UI Semibold");
-            _toggleBtnLabel.FontSize = 11.5;
-            _toggleBtnLabel.VerticalAlignment = VerticalAlignment.Center;
+            _toggleBtnLabel = new TextBlock
+            {
+                Text = "⇄   Quick Toggle Input (HDMI ⇄ DisplayPort)",
+                Foreground = BrushFromHex("#E2E8F0"),
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
             Grid.SetColumn(_toggleBtnLabel, 0);
             g.Children.Add(_toggleBtnLabel);
 
-            _toggleBtnHotkey = new TextBlock();
-            _toggleBtnHotkey.Text = "Ctrl+Alt+S";
-            _toggleBtnHotkey.Foreground = BrushFromHex("#64748B");
-            _toggleBtnHotkey.FontSize = 10.2;
-            _toggleBtnHotkey.VerticalAlignment = VerticalAlignment.Center;
+            _toggleBtnHotkey = new TextBlock
+            {
+                Text = "Ctrl+Alt+S",
+                Foreground = BrushFromHex("#64748B"),
+                FontSize = 10.2,
+                VerticalAlignment = VerticalAlignment.Center
+            };
             Grid.SetColumn(_toggleBtnHotkey, 1);
             g.Children.Add(_toggleBtnHotkey);
 
@@ -756,37 +841,40 @@ namespace DisplayInputSwitcher.UI
 
         private UIElement BuildQuickControlsSection()
         {
-            StackPanel section = new StackPanel();
-            section.Margin = new Thickness(0, 0, 0, 8);
+            StackPanel section = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
 
-            // Collapsible Drawer Header
-            Border header = new Border();
-            header.CornerRadius = new CornerRadius(9);
-            header.Background = BrushFromHex("#111A2C");
-            header.BorderBrush = BrushFromHex("#1E293B");
-            header.BorderThickness = new Thickness(1);
-            header.Padding = new Thickness(11, 6, 11, 6);
-            header.Cursor = Cursors.Hand;
+            Border header = new Border
+            {
+                CornerRadius = new CornerRadius(9),
+                Background = BrushFromHex("#111A2C"),
+                BorderBrush = BrushFromHex("#1E293B"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(11, 6, 11, 6),
+                Cursor = Cursors.Hand
+            };
 
             Grid hg = new Grid();
             hg.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             hg.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            TextBlock hTitle = new TextBlock();
-            hTitle.Text = "☀  Quick Controls  (Brightness & Speaker Volume)";
-            hTitle.Foreground = BrushFromHex("#94A3B8");
-            hTitle.FontFamily = new FontFamily("Segoe UI Semibold");
-            hTitle.FontSize = 11;
+            TextBlock hTitle = new TextBlock
+            {
+                Text = "☀  Quick Controls  (Brightness & Speaker Volume)",
+                Foreground = BrushFromHex("#94A3B8"),
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                FontSize = 11
+            };
             Grid.SetColumn(hTitle, 0);
             hg.Children.Add(hTitle);
 
-            _quickDrawerChevron = new TextBlock();
-            _quickDrawerChevron.Text = _config.QuickDrawerExpanded ? "▴" : "▾";
-            _quickDrawerChevron.Foreground = BrushFromHex("#64748B");
-            _quickDrawerChevron.FontSize = 12;
+            _quickDrawerChevron = new TextBlock
+            {
+                Text = _config.QuickDrawerExpanded ? "▴" : "▾",
+                Foreground = BrushFromHex("#64748B"),
+                FontSize = 12
+            };
             Grid.SetColumn(_quickDrawerChevron, 1);
             hg.Children.Add(_quickDrawerChevron);
-
             header.Child = hg;
 
             header.MouseEnter += delegate { header.BorderBrush = BrushFromHex("#334155"); hTitle.Foreground = BrushFromHex("#E2E8F0"); };
@@ -802,44 +890,41 @@ namespace DisplayInputSwitcher.UI
                     Task ignored = RefreshLiveSnapshotOnlyAsync(true);
                 }
             };
-
             section.Children.Add(header);
 
-            // Collapsible Content
-            _quickDrawerContent = new Border();
-            _quickDrawerContent.CornerRadius = new CornerRadius(10);
-            _quickDrawerContent.Background = BrushFromHex("#111A2E");
-            _quickDrawerContent.BorderBrush = BrushFromHex("#1F2D46");
-            _quickDrawerContent.BorderThickness = new Thickness(1);
-            _quickDrawerContent.Padding = new Thickness(12, 10, 12, 10);
-            _quickDrawerContent.Margin = new Thickness(0, 5, 0, 0);
-            _quickDrawerContent.Visibility = _config.QuickDrawerExpanded ? Visibility.Visible : Visibility.Collapsed;
+            _quickDrawerContent = new Border
+            {
+                CornerRadius = new CornerRadius(10),
+                Background = BrushFromHex("#111A2E"),
+                BorderBrush = BrushFromHex("#1F2D46"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(12, 10, 12, 10),
+                Margin = new Thickness(0, 5, 0, 0),
+                Visibility = _config.QuickDrawerExpanded ? Visibility.Visible : Visibility.Collapsed
+            };
 
             StackPanel slidersStack = new StackPanel();
 
-            // Brightness Row (VCP 10)
-            _brightnessRow = new Grid();
-            _brightnessRow.Margin = new Thickness(0, 0, 0, 8);
+            _brightnessRow = new Grid { Margin = new Thickness(0, 0, 0, 8) };
             _brightnessRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(86) });
             _brightnessRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             _brightnessRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(40) });
 
-            TextBlock brLabel = new TextBlock();
-            brLabel.Text = "☀ Brightness";
-            brLabel.Foreground = BrushFromHex("#CBD5E1");
-            brLabel.FontSize = 11;
-            brLabel.VerticalAlignment = VerticalAlignment.Center;
+            TextBlock brLabel = new TextBlock
+            {
+                Text = "☀ Brightness",
+                Foreground = BrushFromHex("#CBD5E1"),
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center
+            };
             Grid.SetColumn(brLabel, 0);
             _brightnessRow.Children.Add(brLabel);
 
             _brightnessSlider = new ModernDarkSlider(ColorFromHex("#06B6D4"), ColorFromHex("#38BDF8"));
-            _brightnessSlider.ValuePreviewChanged += delegate(uint v)
-            {
-                _brightnessValueText.Text = v.ToString() + "%";
-            };
+            _brightnessSlider.ValuePreviewChanged += delegate(uint v) { _brightnessValueText.Text = v + "%"; };
             _brightnessSlider.ValueCommittedByUser += delegate(uint v)
             {
-                _brightnessValueText.Text = v.ToString() + "%";
+                _brightnessValueText.Text = v + "%";
                 _pendingBrightness = v;
                 _brightnessDebounce.Stop();
                 _brightnessDebounce.Start();
@@ -847,47 +932,36 @@ namespace DisplayInputSwitcher.UI
             Grid.SetColumn(_brightnessSlider, 1);
             _brightnessRow.Children.Add(_brightnessSlider);
 
-            _brightnessValueText = new TextBlock();
-            _brightnessValueText.Text = "--%";
-            _brightnessValueText.Foreground = BrushFromHex("#38BDF8");
-            _brightnessValueText.FontFamily = new FontFamily("Segoe UI Semibold");
-            _brightnessValueText.FontSize = 11;
-            _brightnessValueText.TextAlignment = TextAlignment.Right;
-            _brightnessValueText.VerticalAlignment = VerticalAlignment.Center;
+            _brightnessValueText = new TextBlock
+            {
+                Text = "--%",
+                Foreground = BrushFromHex("#38BDF8"),
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                FontSize = 11,
+                TextAlignment = TextAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center
+            };
             Grid.SetColumn(_brightnessValueText, 2);
             _brightnessRow.Children.Add(_brightnessValueText);
-
             slidersStack.Children.Add(_brightnessRow);
 
-            // Speaker Volume Row (VCP 62 + VCP 8D Mute)
             _volumeRow = new Grid();
             _volumeRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(86) });
             _volumeRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             _volumeRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(40) });
 
-            _muteBtn = new Border();
-            _muteBtn.CornerRadius = new CornerRadius(5);
-            _muteBtn.Background = Brushes.Transparent;
-            _muteBtn.Cursor = Cursors.Hand;
-            _muteBtn.ToolTip = "Click to toggle Monitor Audio Mute (VCP 8D)";
-            _muteGlyph = new TextBlock();
-            _muteGlyph.Text = "🔊 Volume";
-            _muteGlyph.Foreground = BrushFromHex("#CBD5E1");
-            _muteGlyph.FontSize = 11;
-            _muteGlyph.VerticalAlignment = VerticalAlignment.Center;
+            _muteBtn = new Border { CornerRadius = new CornerRadius(5), Background = Brushes.Transparent, Cursor = Cursors.Hand, ToolTip = "Toggle Monitor Audio Mute (VCP 8D)" };
+            _muteGlyph = new TextBlock { Text = "🔊 Volume", Foreground = BrushFromHex("#CBD5E1"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center };
             _muteBtn.Child = _muteGlyph;
             _muteBtn.MouseLeftButtonUp += delegate { ToggleMonitorMute(); };
             Grid.SetColumn(_muteBtn, 0);
             _volumeRow.Children.Add(_muteBtn);
 
             _volumeSlider = new ModernDarkSlider(ColorFromHex("#8B5CF6"), ColorFromHex("#A78BFA"));
-            _volumeSlider.ValuePreviewChanged += delegate(uint v)
-            {
-                _volumeValueText.Text = v.ToString() + "%";
-            };
+            _volumeSlider.ValuePreviewChanged += delegate(uint v) { _volumeValueText.Text = v + "%"; };
             _volumeSlider.ValueCommittedByUser += delegate(uint v)
             {
-                _volumeValueText.Text = v.ToString() + "%";
+                _volumeValueText.Text = v + "%";
                 _pendingVolume = v;
                 _volumeDebounce.Stop();
                 _volumeDebounce.Start();
@@ -895,91 +969,134 @@ namespace DisplayInputSwitcher.UI
             Grid.SetColumn(_volumeSlider, 1);
             _volumeRow.Children.Add(_volumeSlider);
 
-            _volumeValueText = new TextBlock();
-            _volumeValueText.Text = "--%";
-            _volumeValueText.Foreground = BrushFromHex("#A78BFA");
-            _volumeValueText.FontFamily = new FontFamily("Segoe UI Semibold");
-            _volumeValueText.FontSize = 11;
-            _volumeValueText.TextAlignment = TextAlignment.Right;
-            _volumeValueText.VerticalAlignment = VerticalAlignment.Center;
+            _volumeValueText = new TextBlock
+            {
+                Text = "--%",
+                Foreground = BrushFromHex("#A78BFA"),
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                FontSize = 11,
+                TextAlignment = TextAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center
+            };
             Grid.SetColumn(_volumeValueText, 2);
             _volumeRow.Children.Add(_volumeValueText);
-
             slidersStack.Children.Add(_volumeRow);
+
             _quickDrawerContent.Child = slidersStack;
             section.Children.Add(_quickDrawerContent);
-
             return section;
         }
 
         private UIElement BuildSettingsSection()
         {
-            _settingsDrawerContent = new Border();
-            _settingsDrawerContent.CornerRadius = new CornerRadius(11);
-            _settingsDrawerContent.Background = BrushFromHex("#111A2E");
-            _settingsDrawerContent.BorderBrush = BrushFromHex("#2E3E5C");
-            _settingsDrawerContent.BorderThickness = new Thickness(1);
-            _settingsDrawerContent.Padding = new Thickness(12, 10, 12, 11);
-            _settingsDrawerContent.Margin = new Thickness(0, 0, 0, 8);
-            _settingsDrawerContent.Visibility = Visibility.Collapsed;
+            _settingsDrawerContent = new Border
+            {
+                CornerRadius = new CornerRadius(11),
+                Background = BrushFromHex("#111A2E"),
+                BorderBrush = BrushFromHex("#2E3E5C"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(12, 10, 12, 11),
+                Margin = new Thickness(0, 0, 0, 8),
+                Visibility = Visibility.Collapsed
+            };
 
             StackPanel sp = new StackPanel();
 
-            TextBlock sec1 = new TextBlock();
-            sec1.Text = "VCP 60 INPUT CODES (1 – 255)";
-            sec1.FontSize = 9.8;
-            sec1.FontFamily = new FontFamily("Segoe UI Semibold");
-            sec1.Foreground = BrushFromHex("#38BDF8");
-            sec1.Margin = new Thickness(0, 0, 0, 6);
-            sp.Children.Add(sec1);
+            Grid sec1Header = new Grid { Margin = new Thickness(0, 0, 0, 6) };
+            sec1Header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            sec1Header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            TextBlock sec1 = new TextBlock
+            {
+                Text = "UNIVERSAL MONITOR INPUT MAPPING",
+                FontSize = 9.8,
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                Foreground = BrushFromHex("#38BDF8")
+            };
+            Grid.SetColumn(sec1, 0);
+            sec1Header.Children.Add(sec1);
+
+            _schemeBadgeText = new TextBlock
+            {
+                Text = "Auto-Detect",
+                FontSize = 9.5,
+                Foreground = BrushFromHex("#6EE7B7")
+            };
+            Grid.SetColumn(_schemeBadgeText, 1);
+            sec1Header.Children.Add(_schemeBadgeText);
+            sp.Children.Add(sec1Header);
+
+            // 1-Click Monitor Preset Pills Row
+            WrapPanel presetsRow = new WrapPanel { Margin = new Thickness(0, 0, 0, 7) };
+            presetsRow.Children.Add(CreateSchemePresetPill("Auto-Detect", delegate { ClearOverrideToAutoDetect(); }));
+            presetsRow.Children.Add(CreateSchemePresetPill("VESA (17 / 15)", delegate { ApplyQuickSchemePreset(0x60, 17, 15); }));
+            presetsRow.Children.Add(CreateSchemePresetPill("LG (1 / 3)", delegate { ApplyQuickSchemePreset(0x60, 1, 3); }));
+            presetsRow.Children.Add(CreateSchemePresetPill("LG Gen5 (144 / 208)", delegate { ApplyQuickSchemePreset(0xF4, 144, 208); }));
+            sp.Children.Add(presetsRow);
 
             Grid codeGrid = new Grid();
             codeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            codeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(52) });
-            codeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(12) });
+            codeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(38) });
+            codeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
             codeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            codeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(52) });
+            codeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(42) });
+            codeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
+            codeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            codeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(42) });
             codeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-            TextBlock lHdmi = CreateSmallLabel("HDMI Code:");
-            lHdmi.Margin = new Thickness(0, 0, 6, 0);
-            Grid.SetColumn(lHdmi, 0);
+            TextBlock lVcp = CreateSmallLabel("VCP:");
+            lVcp.Margin = new Thickness(0, 0, 4, 0);
+            Grid.SetColumn(lVcp, 0);
+            codeGrid.Children.Add(lVcp);
+
+            _vcpHexInput = CreateDarkTextBox("60");
+            _vcpHexInput.ToolTip = "Hex VCP input code (60 standard, F4 on some LG Gen5 models)";
+            Grid.SetColumn(_vcpHexInput, 1);
+            codeGrid.Children.Add(_vcpHexInput);
+
+            TextBlock lHdmi = CreateSmallLabel("HDMI:");
+            lHdmi.Margin = new Thickness(0, 0, 4, 0);
+            Grid.SetColumn(lHdmi, 3);
             codeGrid.Children.Add(lHdmi);
 
-            _hdmiCodeInput = CreateDarkTextBox(_config.HdmiValue.ToString());
-            Grid.SetColumn(_hdmiCodeInput, 1);
+            _hdmiCodeInput = CreateDarkTextBox("1");
+            Grid.SetColumn(_hdmiCodeInput, 4);
             codeGrid.Children.Add(_hdmiCodeInput);
 
-            TextBlock lDp = CreateSmallLabel("DP Code:");
-            lDp.Margin = new Thickness(0, 0, 6, 0);
-            Grid.SetColumn(lDp, 3);
+            TextBlock lDp = CreateSmallLabel("DP:");
+            lDp.Margin = new Thickness(0, 0, 4, 0);
+            Grid.SetColumn(lDp, 6);
             codeGrid.Children.Add(lDp);
 
-            _dpCodeInput = CreateDarkTextBox(_config.DpValue.ToString());
-            Grid.SetColumn(_dpCodeInput, 4);
+            _dpCodeInput = CreateDarkTextBox("3");
+            Grid.SetColumn(_dpCodeInput, 7);
             codeGrid.Children.Add(_dpCodeInput);
 
-            Border applyCodesBtn = CreateCompactPillButton("Save Codes", "#0284C7", ApplyCustomVcpCodesFromUi);
+            Border applyCodesBtn = CreateCompactPillButton("Save", "#0284C7", ApplyCustomVcpCodesFromUi);
             applyCodesBtn.HorizontalAlignment = HorizontalAlignment.Right;
-            Grid.SetColumn(applyCodesBtn, 5);
+            Grid.SetColumn(applyCodesBtn, 8);
             codeGrid.Children.Add(applyCodesBtn);
 
             sp.Children.Add(codeGrid);
 
-            _possibleValuesHint = new TextBlock();
-            _possibleValuesHint.Text = "Monitor Possible Values (VCP 60): 1, 3";
-            _possibleValuesHint.FontSize = 10;
-            _possibleValuesHint.Foreground = BrushFromHex("#64748B");
-            _possibleValuesHint.Margin = new Thickness(0, 5, 0, 10);
+            _possibleValuesHint = new TextBlock
+            {
+                Text = "Detected Monitor Inputs: probing...",
+                FontSize = 10,
+                Foreground = BrushFromHex("#64748B"),
+                Margin = new Thickness(0, 5, 0, 10)
+            };
             sp.Children.Add(_possibleValuesHint);
 
-            // Global Hotkeys Section
-            TextBlock sec2 = new TextBlock();
-            sec2.Text = "GLOBAL KEYBOARD SHORTCUTS (CLICK BOX & PRESS KEYS)";
-            sec2.FontSize = 9.8;
-            sec2.FontFamily = new FontFamily("Segoe UI Semibold");
-            sec2.Foreground = BrushFromHex("#A78BFA");
-            sec2.Margin = new Thickness(0, 0, 0, 5);
+            TextBlock sec2 = new TextBlock
+            {
+                Text = "GLOBAL KEYBOARD SHORTCUTS (CLICK BOX & PRESS KEYS)",
+                FontSize = 9.8,
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                Foreground = BrushFromHex("#A78BFA"),
+                Margin = new Thickness(0, 0, 0, 5)
+            };
             sp.Children.Add(sec2);
 
             _enableHotkeysToggle = CreateDarkToggleSwitch("Enable global hotkeys in background", _config.HotkeysEnabled, out _setEnableHotkeysVisual, delegate(bool isChecked)
@@ -1005,13 +1122,14 @@ namespace DisplayInputSwitcher.UI
                 SaveAndRefreshHotkeys();
             }));
 
-            _hotkeyStatusLabel = new TextBlock();
-            _hotkeyStatusLabel.FontSize = 9.8;
-            _hotkeyStatusLabel.Foreground = BrushFromHex("#6EE7B7");
-            _hotkeyStatusLabel.Margin = new Thickness(0, 3, 0, 8);
+            _hotkeyStatusLabel = new TextBlock
+            {
+                FontSize = 9.8,
+                Foreground = BrushFromHex("#6EE7B7"),
+                Margin = new Thickness(0, 3, 0, 8)
+            };
             sp.Children.Add(_hotkeyStatusLabel);
 
-            // General Behavior Toggles
             _closeToTrayToggle = CreateDarkToggleSwitch("Close button (✕) minimizes to System Tray", _config.MinimizeToTrayOnClose, out _setCloseToTrayVisual, delegate(bool c)
             {
                 _config.MinimizeToTrayOnClose = c;
@@ -1019,7 +1137,7 @@ namespace DisplayInputSwitcher.UI
             });
             sp.Children.Add(_closeToTrayToggle);
 
-            _oneByteMaskToggle = CreateDarkToggleSwitch("Use 1-Byte VCP 60 mask (& 0xFF for LG/Dell DDC/CI)", _config.UseOneByteInputMask, out _setOneByteMaskVisual, delegate(bool c)
+            _oneByteMaskToggle = CreateDarkToggleSwitch("Use 1-Byte VCP mask (& 0xFF for LG/Dell/BenQ)", _config.UseOneByteInputMask, out _setOneByteMaskVisual, delegate(bool c)
             {
                 _config.UseOneByteInputMask = c;
                 _configService.Save(_config);
@@ -1033,14 +1151,12 @@ namespace DisplayInputSwitcher.UI
             });
             sp.Children.Add(_startupToggle);
 
-            // Bottom action row inside Settings (Reset Defaults + Quit Completely)
-            Grid bottomActions = new Grid();
-            bottomActions.Margin = new Thickness(0, 8, 0, 0);
+            Grid bottomActions = new Grid { Margin = new Thickness(0, 8, 0, 0) };
             bottomActions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             bottomActions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             bottomActions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            Border resetHkBtn = CreateCompactPillButton("Reset Defaults", "#334155", ResetSettingsDefaults);
+            Border resetHkBtn = CreateCompactPillButton("Reset All Auto", "#334155", ResetSettingsDefaults);
             Grid.SetColumn(resetHkBtn, 0);
             bottomActions.Children.Add(resetHkBtn);
 
@@ -1053,10 +1169,35 @@ namespace DisplayInputSwitcher.UI
             return _settingsDrawerContent;
         }
 
+        private Border CreateSchemePresetPill(string text, Action onClick)
+        {
+            Border b = new Border
+            {
+                CornerRadius = new CornerRadius(6),
+                Background = BrushFromHex("#18243C"),
+                BorderBrush = BrushFromHex("#2A3B59"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(7, 3, 7, 3),
+                Margin = new Thickness(0, 0, 5, 4),
+                Cursor = Cursors.Hand
+            };
+            TextBlock t = new TextBlock
+            {
+                Text = text,
+                FontSize = 9.6,
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                Foreground = BrushFromHex("#CBD5E1")
+            };
+            b.Child = t;
+            b.MouseEnter += delegate { b.BorderBrush = BrushFromHex("#38BDF8"); t.Foreground = Brushes.White; };
+            b.MouseLeave += delegate { b.BorderBrush = BrushFromHex("#2A3B59"); t.Foreground = BrushFromHex("#CBD5E1"); };
+            b.MouseLeftButtonUp += delegate { if (onClick != null) onClick(); };
+            return b;
+        }
+
         private UIElement BuildHotkeyCaptureRow(string labelText, out TextBox boxOut, string initialValue, Action<string> onCaptured)
         {
-            Grid row = new Grid();
-            row.Margin = new Thickness(0, 3, 0, 2);
+            Grid row = new Grid { Margin = new Thickness(0, 3, 0, 2) };
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(110) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
@@ -1113,54 +1254,58 @@ namespace DisplayInputSwitcher.UI
 
         private UIElement BuildFooterBar()
         {
-            Grid footer = new Grid();
-            footer.Margin = new Thickness(2, 2, 2, 0);
+            Grid footer = new Grid { Margin = new Thickness(2, 2, 2, 0) };
             footer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             footer.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            _statusFooterText = new TextBlock();
-            _statusFooterText.Text = "Initializing DDC/CI engine...";
-            _statusFooterText.Foreground = BrushFromHex("#64748B");
-            _statusFooterText.FontSize = 10.2;
-            _statusFooterText.TextTrimming = TextTrimming.CharacterEllipsis;
+            _statusFooterText = new TextBlock
+            {
+                Text = "Initializing universal DDC/CI engine...",
+                Foreground = BrushFromHex("#64748B"),
+                FontSize = 10.2,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
             Grid.SetColumn(_statusFooterText, 0);
             footer.Children.Add(_statusFooterText);
 
-            TextBlock credit = new TextBlock();
-            credit.Text = "Portable DDC/CI • Shihab";
-            credit.Foreground = BrushFromHex("#475569");
-            credit.FontSize = 9.8;
-            credit.Margin = new Thickness(8, 0, 0, 0);
+            TextBlock credit = new TextBlock
+            {
+                Text = "Universal DDC/CI • Shihab",
+                Foreground = BrushFromHex("#475569"),
+                FontSize = 9.8,
+                Margin = new Thickness(8, 0, 0, 0)
+            };
             Grid.SetColumn(credit, 1);
             footer.Children.Add(credit);
-
             return footer;
         }
 
         private TextBlock CreateSmallLabel(string text)
         {
-            TextBlock tb = new TextBlock();
-            tb.Text = text;
-            tb.Foreground = BrushFromHex("#CBD5E1");
-            tb.FontSize = 10.8;
-            tb.VerticalAlignment = VerticalAlignment.Center;
-            return tb;
+            return new TextBlock
+            {
+                Text = text,
+                Foreground = BrushFromHex("#CBD5E1"),
+                FontSize = 10.8,
+                VerticalAlignment = VerticalAlignment.Center
+            };
         }
 
         private TextBox CreateDarkTextBox(string initial)
         {
-            TextBox tb = new TextBox();
-            tb.Text = initial;
-            tb.Background = BrushFromHex("#0B1120");
-            tb.Foreground = BrushFromHex("#F8FAFC");
-            tb.CaretBrush = Brushes.White;
-            tb.BorderBrush = BrushFromHex("#334155");
-            tb.BorderThickness = new Thickness(1);
-            tb.Padding = new Thickness(6, 3, 6, 3);
-            tb.FontSize = 11;
-            tb.FontFamily = new FontFamily("Segoe UI Semibold");
-            tb.TextAlignment = TextAlignment.Center;
-            return tb;
+            return new TextBox
+            {
+                Text = initial,
+                Background = BrushFromHex("#0B1120"),
+                Foreground = BrushFromHex("#F8FAFC"),
+                CaretBrush = Brushes.White,
+                BorderBrush = BrushFromHex("#334155"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(5, 3, 5, 3),
+                FontSize = 11,
+                FontFamily = new FontFamily("Segoe UI Semibold"),
+                TextAlignment = TextAlignment.Center
+            };
         }
 
         private FrameworkElement CreateDarkToggleSwitch(
@@ -1169,35 +1314,24 @@ namespace DisplayInputSwitcher.UI
             out Action<bool> setStateVisualOut,
             Action<bool> onChanged)
         {
-            Grid row = new Grid();
-            row.Margin = new Thickness(0, 4, 0, 4);
-            row.Cursor = Cursors.Hand;
-            row.Background = Brushes.Transparent;
+            Grid row = new Grid { Margin = new Thickness(0, 4, 0, 4), Cursor = Cursors.Hand, Background = Brushes.Transparent };
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-            Border pillTrack = new Border();
-            pillTrack.Width = 30;
-            pillTrack.Height = 16;
-            pillTrack.CornerRadius = new CornerRadius(8);
-            pillTrack.Margin = new Thickness(0, 0, 9, 0);
-            pillTrack.VerticalAlignment = VerticalAlignment.Center;
-
-            Ellipse knob = new Ellipse();
-            knob.Width = 12;
-            knob.Height = 12;
-            knob.Fill = Brushes.White;
-            knob.VerticalAlignment = VerticalAlignment.Center;
+            Border pillTrack = new Border
+            {
+                Width = 30,
+                Height = 16,
+                CornerRadius = new CornerRadius(8),
+                Margin = new Thickness(0, 0, 9, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Ellipse knob = new Ellipse { Width = 12, Height = 12, Fill = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
             pillTrack.Child = knob;
-
             Grid.SetColumn(pillTrack, 0);
             row.Children.Add(pillTrack);
 
-            TextBlock txt = new TextBlock();
-            txt.Text = label;
-            txt.Foreground = BrushFromHex("#CBD5E1");
-            txt.FontSize = 10.8;
-            txt.VerticalAlignment = VerticalAlignment.Center;
+            TextBlock txt = new TextBlock { Text = label, Foreground = BrushFromHex("#CBD5E1"), FontSize = 10.8, VerticalAlignment = VerticalAlignment.Center };
             Grid.SetColumn(txt, 1);
             row.Children.Add(txt);
 
@@ -1226,46 +1360,107 @@ namespace DisplayInputSwitcher.UI
 
         private Border CreateCompactPillButton(string text, string hexColor, Action onClick)
         {
-            Border b = new Border();
-            b.CornerRadius = new CornerRadius(6);
-            b.Background = BrushFromHex(hexColor);
-            b.Padding = new Thickness(10, 4, 10, 4);
-            b.Cursor = Cursors.Hand;
-
-            TextBlock t = new TextBlock();
-            t.Text = text;
-            t.Foreground = Brushes.White;
-            t.FontSize = 10.5;
-            t.FontFamily = new FontFamily("Segoe UI Semibold");
+            Border b = new Border
+            {
+                CornerRadius = new CornerRadius(6),
+                Background = BrushFromHex(hexColor),
+                Padding = new Thickness(10, 4, 10, 4),
+                Cursor = Cursors.Hand
+            };
+            TextBlock t = new TextBlock
+            {
+                Text = text,
+                Foreground = Brushes.White,
+                FontSize = 10.5,
+                FontFamily = new FontFamily("Segoe UI Semibold")
+            };
             b.Child = t;
-
             b.MouseEnter += delegate { b.Opacity = 0.88; };
             b.MouseLeave += delegate { b.Opacity = 1.0; };
             b.MouseLeftButtonUp += delegate { if (onClick != null) onClick(); };
             return b;
         }
 
-        private void ApplyConfigToUi()
+        private void RecomputeActiveMonitorMap()
+        {
+            if (_selectedMonitor == null)
+            {
+                _activeMap = new ResolvedMonitorInputMap();
+                return;
+            }
+
+            MonitorInputProfile saved = ConfigService.GetProfileForMonitor(_config, _selectedMonitor.StableSelectionKey);
+            byte vcpToQuery = (saved != null && saved.IsUserCustomized && saved.InputVcpCode != 0)
+                ? saved.InputVcpCode
+                : _selectedMonitor.PreferredInputVcpCode;
+
+            List<byte> discrete = new List<byte>();
+            if (_selectedMonitor.Capabilities != null)
+            {
+                discrete = _selectedMonitor.Capabilities.GetValuesForVcp(vcpToQuery);
+                if (discrete.Count == 0)
+                {
+                    discrete = _selectedMonitor.Capabilities.GetInputSelectValues();
+                }
+            }
+
+            _activeMap = InputProfileResolver.Resolve(
+                _selectedMonitor.ManufacturerCode,
+                _selectedMonitor.PreferredInputVcpCode,
+                discrete,
+                _activeInputCode,
+                _activeMaxInputCode,
+                saved);
+        }
+
+        private void ApplyResolvedMapAndConfigToUi()
         {
             Topmost = _config.AlwaysOnTop;
-            _hdmiCardTitle.Text = _config.HdmiLabel;
-            _dpCardTitle.Text = _config.DpLabel;
-            _hdmiCodeBadge.Text = string.Format("VCP 60 • Code {0}", _config.HdmiValue);
-            _dpCodeBadge.Text = string.Format("VCP 60 • Code {0}", _config.DpValue);
+
+            _hdmiCardTitle.Text = _activeMap.HdmiLabel;
+            _dpCardTitle.Text = _activeMap.DpLabel;
+            _hdmiCodeBadge.Text = string.Format("VCP {0:X2} • Code {1}", _activeMap.InputVcpCode, _activeMap.HdmiValue);
+            _dpCodeBadge.Text = string.Format("VCP {0:X2} • Code {1}", _activeMap.InputVcpCode, _activeMap.DpValue);
+
+            _toggleBtnLabel.Text = string.Format("⇄   Quick Toggle ({0} ⇄ {1})", _activeMap.HdmiLabel, _activeMap.DpLabel);
 
             _hdmiHotkeyHint.Text = (_config.HotkeysEnabled && !string.IsNullOrEmpty(_config.HdmiHotkey)) ? _config.HdmiHotkey : "Click to Switch";
             _dpHotkeyHint.Text = (_config.HotkeysEnabled && !string.IsNullOrEmpty(_config.DpHotkey)) ? _config.DpHotkey : "Click to Switch";
             _toggleBtnHotkey.Text = (_config.HotkeysEnabled && !string.IsNullOrEmpty(_config.ToggleHotkey)) ? _config.ToggleHotkey : "";
 
-            _hdmiCodeInput.Text = _config.HdmiValue.ToString();
-            _dpCodeInput.Text = _config.DpValue.ToString();
+            _schemeBadgeText.Text = _activeMap.DetectionSummary;
+            _vcpHexInput.Text = _activeMap.InputVcpCode.ToString("X2");
+            _hdmiCodeInput.Text = _activeMap.HdmiValue.ToString();
+            _dpCodeInput.Text = _activeMap.DpValue.ToString();
+
             _hdmiHotkeyBox.Text = _config.HdmiHotkey;
             _dpHotkeyBox.Text = _config.DpHotkey;
             _toggleHotkeyBox.Text = _config.ToggleHotkey;
 
+            if (_selectedMonitor != null)
+            {
+                string gpuText = !string.IsNullOrEmpty(_selectedMonitor.AdapterName) ? _selectedMonitor.AdapterName : _selectedMonitor.MonitorDeviceName;
+                _monitorSubText.Text = string.Format("{0}  •  {1}", gpuText, _activeMap.DetectionSummary);
+
+                if (_activeMap.DetectedOptions.Count > 0)
+                {
+                    List<string> labels = new List<string>();
+                    for (int i = 0; i < _activeMap.DetectedOptions.Count; i++)
+                    {
+                        labels.Add(_activeMap.DetectedOptions[i].ShortChipLabel);
+                    }
+                    _possibleValuesHint.Text = "Hardware Capabilities: " + string.Join(", ", labels.ToArray());
+                }
+                else
+                {
+                    _possibleValuesHint.Text = "Hardware Capabilities: No discrete list reported (using smart scheme)";
+                }
+            }
+
+            RebuildExtraPortsChips();
             UpdateToolbarHighlights();
             UpdateInputCardsVisualState();
-            _trayManager.UpdateTrayVisual(_selectedMonitor != null ? _selectedMonitor.EdidMonitorName : null, _config, _activeInputCode);
+            _trayManager.UpdateTrayVisual(_selectedMonitor != null ? _selectedMonitor.EdidMonitorName : null, _config, _activeMap, _activeInputCode);
         }
 
         private void UpdateToolbarHighlights()
@@ -1290,8 +1485,8 @@ namespace DisplayInputSwitcher.UI
         {
             if (!_activeInputCode.HasValue) return false;
             return isHdmiSlot
-                ? (_activeInputCode.Value == _config.HdmiValue)
-                : (_activeInputCode.Value == _config.DpValue);
+                ? (_activeInputCode.Value == _activeMap.HdmiValue)
+                : (_activeInputCode.Value == _activeMap.DpValue);
         }
 
         private void UpdateInputCardsVisualState()
@@ -1348,7 +1543,7 @@ namespace DisplayInputSwitcher.UI
             if (_isSwitchingOrReading) return;
             _isSwitchingOrReading = true;
             SetLiveBadge("SCANNING", "#2E2311", "#F59E0B", "#FBBF24", "#FDE68A");
-            _statusFooterText.Text = "Enumerating displays & DDC/CI capabilities...";
+            _statusFooterText.Text = "Auto-detecting displays & DDC/CI capabilities...";
 
             try
             {
@@ -1357,7 +1552,7 @@ namespace DisplayInputSwitcher.UI
                 {
                     _selectedMonitor = null;
                     _monitorTitleText.Text = "No DDC/CI Display Found";
-                    _monitorSubText.Text = "Check monitor power / cable connection";
+                    _monitorSubText.Text = "Check monitor cable or OSD DDC/CI setting";
                     SetLiveBadge("OFFLINE", "#331418", "#EF4444", "#F87171", "#FCA5A5");
                     _statusFooterText.Text = "No active display handles returned by Windows.";
                     return;
@@ -1377,6 +1572,8 @@ namespace DisplayInputSwitcher.UI
         private void SelectMonitor(MonitorDeviceRecord mon, bool saveSelection)
         {
             _selectedMonitor = mon;
+            _activeInputCode = null;
+            _activeMaxInputCode = null;
             if (mon == null) return;
 
             if (saveSelection)
@@ -1386,18 +1583,13 @@ namespace DisplayInputSwitcher.UI
             }
 
             _monitorTitleText.Text = mon.DropdownLabel;
-
-            List<byte> possibleInputs = (mon.Capabilities != null) ? mon.Capabilities.GetInputSelectValues() : new List<byte>();
-            string posStr = possibleInputs.Count > 0 ? string.Join(", ", possibleInputs) : "1, 3";
-            _possibleValuesHint.Text = string.Format("Monitor Possible Values (VCP 60): {0}", posStr);
-
-            string gpuText = !string.IsNullOrEmpty(mon.AdapterName) ? mon.AdapterName : mon.MonitorDeviceName;
-            _monitorSubText.Text = string.Format("{0}  •  VCP 60 [{1}]", gpuText, posStr);
-
             _brightnessRow.IsEnabled = mon.SupportsBrightness;
             _brightnessRow.Opacity = mon.SupportsBrightness ? 1.0 : 0.45;
             _volumeRow.IsEnabled = mon.SupportsVolume;
             _volumeRow.Opacity = mon.SupportsVolume ? 1.0 : 0.45;
+
+            RecomputeActiveMonitorMap();
+            ApplyResolvedMapAndConfigToUi();
 
             if (saveSelection)
             {
@@ -1411,8 +1603,12 @@ namespace DisplayInputSwitcher.UI
             _isSwitchingOrReading = true;
             try
             {
+                MonitorInputProfile saved = ConfigService.GetProfileForMonitor(_config, _selectedMonitor.StableSelectionKey);
+                byte? customVcp = (saved != null && saved.IsUserCustomized) ? (byte?)saved.InputVcpCode : null;
+
                 DdcResult<MonitorLiveSnapshot> res = await _ddcService.ReadLiveSnapshotAsync(
                     _selectedMonitor.StableSelectionKey,
+                    customVcp,
                     _config.UseOneByteInputMask,
                     _config.RetryOnI2cFailure,
                     includeQuickControls);
@@ -1421,19 +1617,20 @@ namespace DisplayInputSwitcher.UI
                 {
                     MonitorLiveSnapshot snap = res.Value;
                     _activeInputCode = snap.CurrentInputValue;
+                    _activeMaxInputCode = snap.MaxInputValue;
 
                     if (snap.Brightness.HasValue)
                     {
                         uint bMax = snap.BrightnessMax.HasValue ? snap.BrightnessMax.Value : 100u;
                         _brightnessSlider.SetValueFromHardware(snap.Brightness.Value, bMax);
-                        _brightnessValueText.Text = snap.Brightness.Value.ToString() + "%";
+                        _brightnessValueText.Text = snap.Brightness.Value + "%";
                     }
 
                     if (snap.Volume.HasValue)
                     {
                         uint vMax = snap.VolumeMax.HasValue ? snap.VolumeMax.Value : 100u;
                         _volumeSlider.SetValueFromHardware(snap.Volume.Value, vMax);
-                        _volumeValueText.Text = snap.Volume.Value.ToString() + "%";
+                        _volumeValueText.Text = snap.Volume.Value + "%";
                     }
 
                     if (snap.IsAudioMuted.HasValue)
@@ -1443,9 +1640,9 @@ namespace DisplayInputSwitcher.UI
                         _muteGlyph.Foreground = _isMuted ? BrushFromHex("#F87171") : BrushFromHex("#CBD5E1");
                     }
 
+                    RecomputeActiveMonitorMap();
                     SetLiveBadge("READY", "#0F2922", "#10B981", "#34D399", "#6EE7B7");
-                    string activeFriendly = DescribeInputCode(_activeInputCode);
-                    _statusFooterText.Text = string.Format("Active: {0}  •  DDC/CI {1} ms", activeFriendly, snap.ReadLatencyMs);
+                    _statusFooterText.Text = string.Format("Active: {0}  •  DDC/CI {1} ms", DescribeInputCode(_activeInputCode), snap.ReadLatencyMs);
                 }
                 else
                 {
@@ -1453,8 +1650,7 @@ namespace DisplayInputSwitcher.UI
                     _statusFooterText.Text = res.ErrorMessage;
                 }
 
-                UpdateInputCardsVisualState();
-                _trayManager.UpdateTrayVisual(_selectedMonitor.EdidMonitorName, _config, _activeInputCode);
+                ApplyResolvedMapAndConfigToUi();
             }
             finally
             {
@@ -1471,10 +1667,11 @@ namespace DisplayInputSwitcher.UI
             }
 
             SetLiveBadge("SWITCHING", "#2E2311", "#F59E0B", "#FBBF24", "#FDE68A");
-            _statusFooterText.Text = string.Format("Switching {0} to {1} (VCP 60 = {2})...", _selectedMonitor.FriendlyTitle, friendlyLabel, targetValue);
+            _statusFooterText.Text = string.Format("Switching {0} to {1} (VCP {2:X2} = {3})...", _selectedMonitor.FriendlyTitle, friendlyLabel, _activeMap.InputVcpCode, targetValue);
 
             DdcResult<uint> res = await _ddcService.SetInputSourceAsync(
                 _selectedMonitor.StableSelectionKey,
+                _activeMap.InputVcpCode,
                 targetValue,
                 _config.UseOneByteInputMask,
                 _config.RetryOnI2cFailure);
@@ -1482,6 +1679,7 @@ namespace DisplayInputSwitcher.UI
             if (res.IsSuccess)
             {
                 _activeInputCode = res.Value;
+                RecomputeActiveMonitorMap();
                 SetLiveBadge("READY", "#0F2922", "#10B981", "#34D399", "#6EE7B7");
                 _statusFooterText.Text = string.Format("Switched to {0} (Code {1})  •  {2} ms", friendlyLabel, _activeInputCode.Value, res.ElapsedMs);
             }
@@ -1491,8 +1689,7 @@ namespace DisplayInputSwitcher.UI
                 _statusFooterText.Text = res.ErrorMessage;
             }
 
-            UpdateInputCardsVisualState();
-            _trayManager.UpdateTrayVisual(_selectedMonitor.EdidMonitorName, _config, _activeInputCode);
+            ApplyResolvedMapAndConfigToUi();
         }
 
         private async void TriggerToggleInput()
@@ -1504,12 +1701,13 @@ namespace DisplayInputSwitcher.UI
             }
 
             SetLiveBadge("TOGGLING", "#2E2311", "#F59E0B", "#FBBF24", "#FDE68A");
-            _statusFooterText.Text = "Toggling HDMI ⇄ DisplayPort over DDC/CI...";
+            _statusFooterText.Text = string.Format("Toggling {0} ⇄ {1} over DDC/CI...", _activeMap.HdmiLabel, _activeMap.DpLabel);
 
             DdcResult<uint> res = await _ddcService.ToggleInputSourceAsync(
                 _selectedMonitor.StableSelectionKey,
-                _config.HdmiValue,
-                _config.DpValue,
+                _activeMap.InputVcpCode,
+                _activeMap.HdmiValue,
+                _activeMap.DpValue,
                 _activeInputCode,
                 _config.UseOneByteInputMask,
                 _config.RetryOnI2cFailure);
@@ -1517,9 +1715,9 @@ namespace DisplayInputSwitcher.UI
             if (res.IsSuccess)
             {
                 _activeInputCode = res.Value;
-                string name = DescribeInputCode(_activeInputCode);
+                RecomputeActiveMonitorMap();
                 SetLiveBadge("READY", "#0F2922", "#10B981", "#34D399", "#6EE7B7");
-                _statusFooterText.Text = string.Format("Switched to {0}  •  {1} ms", name, res.ElapsedMs);
+                _statusFooterText.Text = string.Format("Switched to {0}  •  {1} ms", DescribeInputCode(_activeInputCode), res.ElapsedMs);
             }
             else
             {
@@ -1527,49 +1725,105 @@ namespace DisplayInputSwitcher.UI
                 _statusFooterText.Text = res.ErrorMessage;
             }
 
-            UpdateInputCardsVisualState();
-            _trayManager.UpdateTrayVisual(_selectedMonitor.EdidMonitorName, _config, _activeInputCode);
+            ApplyResolvedMapAndConfigToUi();
         }
 
         private string DescribeInputCode(uint? code)
         {
             if (!code.HasValue) return "Unknown";
-            if (code.Value == _config.HdmiValue) return string.Format("{0} (Code {1})", _config.HdmiLabel, code.Value);
-            if (code.Value == _config.DpValue) return string.Format("{0} (Code {1})", _config.DpLabel, code.Value);
+            if (code.Value == _activeMap.HdmiValue) return string.Format("{0} (Code {1})", _activeMap.HdmiLabel, code.Value);
+            if (code.Value == _activeMap.DpValue) return string.Format("{0} (Code {1})", _activeMap.DpLabel, code.Value);
+            for (int i = 0; i < _activeMap.DetectedOptions.Count; i++)
+            {
+                if (_activeMap.DetectedOptions[i].Code == code.Value)
+                {
+                    return _activeMap.DetectedOptions[i].ShortChipLabel;
+                }
+            }
             return string.Format("Input Code {0}", code.Value);
         }
 
-        private void SwapHdmiAndDpValues()
+        private void SwapCurrentMonitorHdmiAndDp()
         {
-            uint tmp = _config.HdmiValue;
-            _config.HdmiValue = _config.DpValue;
-            _config.DpValue = tmp;
+            if (_selectedMonitor == null) return;
+            ConfigService.SaveCustomProfileForMonitor(
+                _config,
+                _selectedMonitor.StableSelectionKey,
+                _activeMap.InputVcpCode,
+                _activeMap.DpValue,
+                _activeMap.HdmiValue,
+                "HDMI",
+                "DisplayPort");
             _configService.Save(_config);
-            ApplyConfigToUi();
-            _statusFooterText.Text = string.Format("Swapped mapping: {0} = {1}, {2} = {3}", _config.HdmiLabel, _config.HdmiValue, _config.DpLabel, _config.DpValue);
+            RecomputeActiveMonitorMap();
+            ApplyResolvedMapAndConfigToUi();
+            _statusFooterText.Text = string.Format("Swapped for {0}: HDMI = {1}, DP = {2}", _selectedMonitor.FriendlyTitle, _activeMap.HdmiValue, _activeMap.DpValue);
+        }
+
+        private void ApplyQuickSchemePreset(byte vcpCode, uint hdmiVal, uint dpVal)
+        {
+            if (_selectedMonitor == null) return;
+            ConfigService.SaveCustomProfileForMonitor(
+                _config,
+                _selectedMonitor.StableSelectionKey,
+                vcpCode,
+                hdmiVal,
+                dpVal,
+                "HDMI",
+                "DisplayPort");
+            _configService.Save(_config);
+            RecomputeActiveMonitorMap();
+            ApplyResolvedMapAndConfigToUi();
+            Task ignored = RefreshLiveSnapshotOnlyAsync(false);
+        }
+
+        private void ClearOverrideToAutoDetect()
+        {
+            if (_selectedMonitor != null)
+            {
+                ConfigService.ClearCustomProfileForMonitor(_config, _selectedMonitor.StableSelectionKey);
+                _configService.Save(_config);
+            }
+            RecomputeActiveMonitorMap();
+            ApplyResolvedMapAndConfigToUi();
+            Task ignored = RefreshLiveSnapshotOnlyAsync(false);
+            _statusFooterText.Text = "Reverted monitor profile to automatic hardware detection.";
         }
 
         private void ApplyCustomVcpCodesFromUi()
         {
+            if (_selectedMonitor == null) return;
+            byte vcpByte;
             uint hVal, dVal;
+            if (!byte.TryParse(_vcpHexInput.Text.Trim(), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out vcpByte) || vcpByte == 0)
+            {
+                _statusFooterText.Text = "Enter a valid hex VCP code (e.g. 60 or F4).";
+                return;
+            }
             if (!uint.TryParse(_hdmiCodeInput.Text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out hVal) || hVal > 255 ||
                 !uint.TryParse(_dpCodeInput.Text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out dVal) || dVal > 255)
             {
-                _statusFooterText.Text = "Please enter valid VCP 60 integer codes between 0 and 255.";
+                _statusFooterText.Text = "Enter valid integer input codes between 0 and 255.";
                 return;
             }
 
-            _config.HdmiValue = hVal;
-            _config.DpValue = dVal;
+            ConfigService.SaveCustomProfileForMonitor(
+                _config,
+                _selectedMonitor.StableSelectionKey,
+                vcpByte,
+                hVal,
+                dVal,
+                "HDMI",
+                "DisplayPort");
             _configService.Save(_config);
-            ApplyConfigToUi();
-            _statusFooterText.Text = string.Format("Saved VCP 60 codes: HDMI = {0}, DisplayPort = {1}", hVal, dVal);
+            RecomputeActiveMonitorMap();
+            ApplyResolvedMapAndConfigToUi();
+            _statusFooterText.Text = string.Format("Saved profile for {0}: VCP {1:X2} (HDMI={2}, DP={3})", _selectedMonitor.FriendlyTitle, vcpByte, hVal, dVal);
         }
 
         private void ResetSettingsDefaults()
         {
-            _config.HdmiValue = 1;
-            _config.DpValue = 3;
+            _config.MonitorProfiles.Clear();
             _config.HotkeysEnabled = true;
             _config.HdmiHotkey = "Ctrl+Alt+1";
             _config.DpHotkey = "Ctrl+Alt+2";
@@ -1580,72 +1834,16 @@ namespace DisplayInputSwitcher.UI
             if (_setCloseToTrayVisual != null) _setCloseToTrayVisual(true);
             if (_setOneByteMaskVisual != null) _setOneByteMaskVisual(true);
             _configService.Save(_config);
-            ApplyConfigToUi();
+            RecomputeActiveMonitorMap();
+            ApplyResolvedMapAndConfigToUi();
             RefreshHotkeys();
-            _statusFooterText.Text = "Restored default codes (1 = HDMI, 3 = DP) and shortcuts.";
-        }
-
-        public async void RunUiPreviewCaptureAsync(string outputDir)
-        {
-            try
-            {
-                if (!System.IO.Directory.Exists(outputDir))
-                {
-                    System.IO.Directory.CreateDirectory(outputDir);
-                }
-                if (_initialLoadTask != null)
-                {
-                    await _initialLoadTask;
-                }
-                await Task.Delay(120);
-                UpdateLayout();
-                SaveWindowPng(System.IO.Path.Combine(outputDir, "ui_compact.png"));
-
-                _quickDrawerContent.Visibility = Visibility.Visible;
-                _quickDrawerChevron.Text = "▴";
-                await RefreshLiveSnapshotOnlyAsync(true);
-                _settingsOpen = true;
-                _settingsDrawerContent.Visibility = Visibility.Visible;
-                UpdateToolbarHighlights();
-                await Task.Delay(180);
-                UpdateLayout();
-                SaveWindowPng(System.IO.Path.Combine(outputDir, "ui_expanded.png"));
-            }
-            catch
-            {
-            }
-            finally
-            {
-                RequestRealExit();
-            }
-        }
-
-        private void SaveWindowPng(string filePath)
-        {
-            FrameworkElement visual = Content as FrameworkElement;
-            if (visual == null) return;
-            DpiScale dpi = VisualTreeHelper.GetDpi(visual);
-            int pxW = Math.Max(1, (int)Math.Ceiling(ActualWidth * dpi.DpiScaleX));
-            int pxH = Math.Max(1, (int)Math.Ceiling(ActualHeight * dpi.DpiScaleY));
-            RenderTargetBitmap rtb = new RenderTargetBitmap(
-                pxW,
-                pxH,
-                96.0 * dpi.DpiScaleX,
-                96.0 * dpi.DpiScaleY,
-                PixelFormats.Pbgra32);
-            rtb.Render(visual);
-            PngBitmapEncoder encoder = new PngBitmapEncoder();
-            encoder.Frames.Add(BitmapFrame.Create(rtb));
-            using (System.IO.FileStream fs = new System.IO.FileStream(filePath, System.IO.FileMode.Create, System.IO.FileAccess.Write))
-            {
-                encoder.Save(fs);
-            }
+            _statusFooterText.Text = "Restored universal auto-detection and default global shortcuts.";
         }
 
         private void SaveAndRefreshHotkeys()
         {
             _configService.Save(_config);
-            ApplyConfigToUi();
+            ApplyResolvedMapAndConfigToUi();
             RefreshHotkeys();
         }
 
@@ -1670,11 +1868,11 @@ namespace DisplayInputSwitcher.UI
         {
             if (action == HotkeyAction.SwitchToHdmi)
             {
-                TriggerSwitchToInput(_config.HdmiValue, _config.HdmiLabel);
+                TriggerSwitchToInput(_activeMap.HdmiValue, _activeMap.HdmiLabel);
             }
             else if (action == HotkeyAction.SwitchToDp)
             {
-                TriggerSwitchToInput(_config.DpValue, _config.DpLabel);
+                TriggerSwitchToInput(_activeMap.DpValue, _activeMap.DpLabel);
             }
             else if (action == HotkeyAction.ToggleInput)
             {
@@ -1724,7 +1922,7 @@ namespace DisplayInputSwitcher.UI
         {
             if (_selectedMonitor == null || !_selectedMonitor.SupportsAudioMute) return;
             bool nextMute = !_isMuted;
-            uint vcpVal = nextMute ? 1u : 2u; // MCCS 8D: 1 = Mute, 2 = Unmute
+            uint vcpVal = nextMute ? 1u : 2u;
             DdcResult<uint> res = await _ddcService.SetContinuousVcpAsync(
                 _selectedMonitor.StableSelectionKey,
                 DdcCiService.VcpAudioMute,
@@ -1746,7 +1944,7 @@ namespace DisplayInputSwitcher.UI
             Topmost = _config.AlwaysOnTop;
             _configService.Save(_config);
             UpdateToolbarHighlights();
-            _trayManager.UpdateTrayVisual(_selectedMonitor != null ? _selectedMonitor.EdidMonitorName : null, _config, _activeInputCode);
+            _trayManager.UpdateTrayVisual(_selectedMonitor != null ? _selectedMonitor.EdidMonitorName : null, _config, _activeMap, _activeInputCode);
             _statusFooterText.Text = _config.AlwaysOnTop ? "Pinned window Always on Top" : "Always on Top disabled";
         }
 
@@ -1827,6 +2025,70 @@ namespace DisplayInputSwitcher.UI
             _hotkeyManager.Dispose();
             _trayManager.Dispose();
             _ddcService.Dispose();
+        }
+
+        public async void RunUiPreviewCaptureAsync(string outputDir)
+        {
+            try
+            {
+                if (!System.IO.Directory.Exists(outputDir))
+                {
+                    System.IO.Directory.CreateDirectory(outputDir);
+                }
+                if (_initialLoadTask != null)
+                {
+                    await _initialLoadTask;
+                }
+                await Task.Delay(120);
+                UpdateLayout();
+                SaveWindowPng(System.IO.Path.Combine(outputDir, "ui_compact.png"));
+
+                _quickDrawerContent.Visibility = Visibility.Visible;
+                _quickDrawerChevron.Text = "▴";
+                await RefreshLiveSnapshotOnlyAsync(true);
+                _settingsOpen = true;
+                _settingsDrawerContent.Visibility = Visibility.Visible;
+                UpdateToolbarHighlights();
+                await Task.Delay(180);
+                UpdateLayout();
+                SaveWindowPng(System.IO.Path.Combine(outputDir, "ui_expanded.png"));
+            }
+            catch
+            {
+            }
+            finally
+            {
+                RequestRealExit();
+            }
+        }
+
+        private void SaveWindowPng(string filePath)
+        {
+            FrameworkElement visual = Content as FrameworkElement;
+            if (visual == null) return;
+            double scaleX = 1.0;
+            double scaleY = 1.0;
+            PresentationSource src = PresentationSource.FromVisual(visual);
+            if (src != null && src.CompositionTarget != null)
+            {
+                scaleX = src.CompositionTarget.TransformToDevice.M11;
+                scaleY = src.CompositionTarget.TransformToDevice.M22;
+            }
+            int pxW = Math.Max(1, (int)Math.Ceiling(ActualWidth * scaleX));
+            int pxH = Math.Max(1, (int)Math.Ceiling(ActualHeight * scaleY));
+            RenderTargetBitmap rtb = new RenderTargetBitmap(
+                pxW,
+                pxH,
+                96.0 * scaleX,
+                96.0 * scaleY,
+                PixelFormats.Pbgra32);
+            rtb.Render(visual);
+            PngBitmapEncoder encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(rtb));
+            using (System.IO.FileStream fs = new System.IO.FileStream(filePath, System.IO.FileMode.Create, System.IO.FileAccess.Write))
+            {
+                encoder.Save(fs);
+            }
         }
 
         private static Color ColorFromHex(string hex)

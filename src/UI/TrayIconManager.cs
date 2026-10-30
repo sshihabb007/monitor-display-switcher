@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
@@ -18,6 +19,8 @@ namespace DisplayInputSwitcher.UI
         private readonly ToolStripMenuItem _hdmiItem;
         private readonly ToolStripMenuItem _dpItem;
         private readonly ToolStripMenuItem _toggleItem;
+        private readonly ToolStripSeparator _extraPortsSep;
+        private readonly List<ToolStripMenuItem> _extraPortItems = new List<ToolStripMenuItem>();
         private readonly ToolStripMenuItem _pinItem;
         private readonly ToolStripMenuItem _openItem;
         private readonly ToolStripMenuItem _exitItem;
@@ -29,6 +32,7 @@ namespace DisplayInputSwitcher.UI
         public event Action SwitchHdmiRequested;
         public event Action SwitchDpRequested;
         public event Action ToggleInputRequested;
+        public event Action<uint, string> SwitchSpecificCodeRequested;
         public event Action ToggleAlwaysOnTopRequested;
         public event Action ExitRequested;
 
@@ -46,14 +50,17 @@ namespace DisplayInputSwitcher.UI
             _headerItem.Enabled = false;
             _headerItem.Font = new Font("Segoe UI Semibold", 9.25f, FontStyle.Bold);
 
-            _hdmiItem = new ToolStripMenuItem("Switch to HDMI (1)");
+            _hdmiItem = new ToolStripMenuItem("Switch to HDMI");
             _hdmiItem.Click += delegate { Raise(SwitchHdmiRequested); };
 
-            _dpItem = new ToolStripMenuItem("Switch to DisplayPort (3)");
+            _dpItem = new ToolStripMenuItem("Switch to DisplayPort");
             _dpItem.Click += delegate { Raise(SwitchDpRequested); };
 
             _toggleItem = new ToolStripMenuItem("Toggle HDMI / DP");
             _toggleItem.Click += delegate { Raise(ToggleInputRequested); };
+
+            _extraPortsSep = new ToolStripSeparator();
+            _extraPortsSep.Visible = false;
 
             _pinItem = new ToolStripMenuItem("Always on Top");
             _pinItem.Click += delegate { Raise(ToggleAlwaysOnTopRequested); };
@@ -71,6 +78,7 @@ namespace DisplayInputSwitcher.UI
             _menu.Items.Add(_hdmiItem);
             _menu.Items.Add(_dpItem);
             _menu.Items.Add(_toggleItem);
+            _menu.Items.Add(_extraPortsSep);
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add(_pinItem);
             _menu.Items.Add(_openItem);
@@ -83,7 +91,7 @@ namespace DisplayInputSwitcher.UI
             _notifyIcon.Visible = true;
             _notifyIcon.MouseClick += OnTrayMouseClick;
 
-            UpdateTrayVisual(null, new AppConfig(), null);
+            UpdateTrayVisual(null, new AppConfig(), new ResolvedMonitorInputMap(), null);
         }
 
         private void OnTrayMouseClick(object sender, MouseEventArgs e)
@@ -98,16 +106,16 @@ namespace DisplayInputSwitcher.UI
             }
         }
 
-        public void UpdateTrayVisual(string monitorName, AppConfig cfg, uint? activeInput)
+        public void UpdateTrayVisual(string monitorName, AppConfig cfg, ResolvedMonitorInputMap map, uint? activeInput)
         {
-            if (_disposed || cfg == null) return;
+            if (_disposed || cfg == null || map == null) return;
 
-            bool isHdmi = activeInput.HasValue && activeInput.Value == cfg.HdmiValue;
-            bool isDp = activeInput.HasValue && activeInput.Value == cfg.DpValue;
+            bool isHdmi = activeInput.HasValue && activeInput.Value == map.HdmiValue;
+            bool isDp = activeInput.HasValue && activeInput.Value == map.DpValue;
 
             string activeTag = isHdmi
-                ? cfg.HdmiLabel + " [" + cfg.HdmiValue + "]"
-                : (isDp ? cfg.DpLabel + " [" + cfg.DpValue + "]" : (activeInput.HasValue ? "Code " + activeInput.Value : "Ready"));
+                ? map.HdmiLabel + " [" + map.HdmiValue + "]"
+                : (isDp ? map.DpLabel + " [" + map.DpValue + "]" : (activeInput.HasValue ? "Code " + activeInput.Value : "Ready"));
 
             string monShort = string.IsNullOrWhiteSpace(monitorName) ? "Input Switcher" : monitorName;
             _headerItem.Text = monShort + " • " + activeTag;
@@ -116,10 +124,46 @@ namespace DisplayInputSwitcher.UI
             string dpHk = (cfg.HotkeysEnabled && !string.IsNullOrEmpty(cfg.DpHotkey)) ? "   (" + cfg.DpHotkey + ")" : "";
             string togHk = (cfg.HotkeysEnabled && !string.IsNullOrEmpty(cfg.ToggleHotkey)) ? "   (" + cfg.ToggleHotkey + ")" : "";
 
-            _hdmiItem.Text = string.Format("{0}  {1} (Code {2}){3}", isHdmi ? "●" : "○", cfg.HdmiLabel, cfg.HdmiValue, hdmiHk);
-            _dpItem.Text = string.Format("{0}  {1} (Code {2}){3}", isDp ? "●" : "○", cfg.DpLabel, cfg.DpValue, dpHk);
-            _toggleItem.Text = string.Format("⇄  Toggle {0} / {1}{2}", cfg.HdmiLabel, cfg.DpLabel, togHk);
+            _hdmiItem.Text = string.Format("{0}  {1} (Code {2}){3}", isHdmi ? "●" : "○", map.HdmiLabel, map.HdmiValue, hdmiHk);
+            _dpItem.Text = string.Format("{0}  {1} (Code {2}){3}", isDp ? "●" : "○", map.DpLabel, map.DpValue, dpHk);
+            _toggleItem.Text = string.Format("⇄  Toggle {0} / {1}{2}", map.HdmiLabel, map.DpLabel, togHk);
             _pinItem.Text = (cfg.AlwaysOnTop ? "✓  " : "    ") + "Always on Top";
+
+            // Dynamic extra port entries for 3+ input monitors (e.g. HDMI 2, USB-C)
+            for (int i = 0; i < _extraPortItems.Count; i++)
+            {
+                _menu.Items.Remove(_extraPortItems[i]);
+                _extraPortItems[i].Dispose();
+            }
+            _extraPortItems.Clear();
+
+            if (map.DetectedOptions != null && map.DetectedOptions.Count > 2)
+            {
+                int insertIdx = _menu.Items.IndexOf(_extraPortsSep) + 1;
+                int added = 0;
+                for (int i = 0; i < map.DetectedOptions.Count; i++)
+                {
+                    DetectedInputOption opt = map.DetectedOptions[i];
+                    if (opt.Code == map.HdmiValue || opt.Code == map.DpValue) continue;
+                    bool optActive = activeInput.HasValue && activeInput.Value == opt.Code;
+                    ToolStripMenuItem mi = new ToolStripMenuItem(string.Format("{0}  {1} (Code {2})", optActive ? "●" : "○", opt.FriendlyName, opt.Code));
+                    uint capCode = opt.Code;
+                    string capName = opt.FriendlyName;
+                    mi.Click += delegate
+                    {
+                        Action<uint, string> h = SwitchSpecificCodeRequested;
+                        if (h != null) h(capCode, capName);
+                    };
+                    _menu.Items.Insert(insertIdx + added, mi);
+                    _extraPortItems.Add(mi);
+                    added++;
+                }
+                _extraPortsSep.Visible = (added > 0);
+            }
+            else
+            {
+                _extraPortsSep.Visible = false;
+            }
 
             string tip = string.Format("{0}\nActive: {1}", monShort, activeTag);
             if (tip.Length > 63)
@@ -141,12 +185,6 @@ namespace DisplayInputSwitcher.UI
             }
         }
 
-        public void ShowNotification(string title, string text)
-        {
-            if (_disposed) return;
-            _notifyIcon.ShowBalloonTip(1800, title, text, ToolTipIcon.Info);
-        }
-
         private static Icon RenderDynamicBadgeIcon(bool isHdmi, bool isDp)
         {
             try
@@ -159,8 +197,8 @@ namespace DisplayInputSwitcher.UI
                         g.Clear(Color.Transparent);
 
                         Color accent = isHdmi
-                            ? Color.FromArgb(34, 211, 238)   // Cyan for HDMI
-                            : (isDp ? Color.FromArgb(167, 139, 250) : Color.FromArgb(96, 165, 250)); // Violet for DP
+                            ? Color.FromArgb(34, 211, 238)
+                            : (isDp ? Color.FromArgb(167, 139, 250) : Color.FromArgb(96, 165, 250));
 
                         using (SolidBrush bg = new SolidBrush(Color.FromArgb(15, 23, 42)))
                         using (Pen borderPen = new Pen(accent, 2.2f))
@@ -270,4 +308,3 @@ namespace DisplayInputSwitcher.UI
         }
     }
 }
-

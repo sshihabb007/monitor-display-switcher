@@ -58,7 +58,14 @@ namespace DisplayInputSwitcher.Services
                 return true;
             };
 
-            NativeMethods.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, callback, IntPtr.Zero);
+            try
+            {
+                NativeMethods.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, callback, IntPtr.Zero);
+            }
+            catch
+            {
+                return new List<MonitorDeviceRecord>();
+            }
 
             Dictionary<string, string> adapterNamesByGdi = BuildAdapterNameMap();
             List<MonitorDeviceRecord> results = new List<MonitorDeviceRecord>();
@@ -80,15 +87,27 @@ namespace DisplayInputSwitcher.Services
                 adapterNamesByGdi.TryGetValue(gdiDevice.ToUpperInvariant(), out adapterName);
 
                 uint physCount = 0;
-                if (!NativeMethods.GetNumberOfPhysicalMonitorsFromHMONITOR(hMon, out physCount) || physCount == 0)
+                NativeMethods.PHYSICAL_MONITOR[] physArray = null;
+                try
                 {
-                    continue;
-                }
+                    if (!NativeMethods.GetNumberOfPhysicalMonitorsFromHMONITOR(hMon, out physCount) || physCount == 0)
+                    {
+                        continue;
+                    }
 
-                NativeMethods.PHYSICAL_MONITOR[] physArray = new NativeMethods.PHYSICAL_MONITOR[physCount];
-                if (!NativeMethods.GetPhysicalMonitorsFromHMONITOR(hMon, physCount, physArray))
+                    physArray = new NativeMethods.PHYSICAL_MONITOR[physCount];
+                    if (!NativeMethods.GetPhysicalMonitorsFromHMONITOR(hMon, physCount, physArray))
+                    {
+                        continue;
+                    }
+                }
+                catch (DllNotFoundException)
                 {
-                    continue;
+                    break;
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    break;
                 }
 
                 List<ChildDisplayDeviceInfo> childDevices = GetAttachedMonitorDevicesForGdi(gdiDevice);
@@ -101,6 +120,7 @@ namespace DisplayInputSwitcher.Services
                     MonitorDeviceRecord rec = new MonitorDeviceRecord(DestroySingleHandle);
                     rec.HMonitor = hMon;
                     rec.PhysicalMonitorHandle = physHandle;
+                    rec.HasPhysicalHandle = true;
                     rec.GdiDisplayName = gdiDevice;
                     rec.AdapterName = adapterName ?? string.Empty;
                     rec.PhysicalDescription = physDesc.Trim();
@@ -115,7 +135,9 @@ namespace DisplayInputSwitcher.Services
                         PopulateFromChildDevice(rec, childDevices[0]);
                     }
 
-                    if (probeCapabilities && physHandle != IntPtr.Zero)
+                    // Note: Dxva2 assigns 0-based table indices (0x0, 0x1, ...) to hPhysicalMonitor,
+                    // so rec.HasPhysicalHandle (NOT physHandle != IntPtr.Zero) governs validity.
+                    if (probeCapabilities && rec.HasPhysicalHandle)
                     {
                         ProbeMonitorSupport(rec);
                     }
@@ -146,78 +168,107 @@ namespace DisplayInputSwitcher.Services
 
         private static void ProbeMonitorSupport(MonitorDeviceRecord rec)
         {
-            uint capLen = 0;
-            bool parsedCapsOk = false;
-            if (NativeMethods.GetCapabilitiesStringLength(rec.PhysicalMonitorHandle, out capLen) && capLen > 0 && capLen < 16384)
+            try
             {
-                byte[] buf = new byte[capLen + 8];
-                if (NativeMethods.CapabilitiesRequestAndCapabilitiesReply(rec.PhysicalMonitorHandle, buf, capLen))
+                uint capLen = 0;
+                bool parsedCapsOk = false;
+                if (NativeMethods.GetCapabilitiesStringLength(rec.PhysicalMonitorHandle, out capLen) && capLen > 0 && capLen < 16384)
                 {
-                    int actualLen = 0;
-                    while (actualLen < buf.Length && buf[actualLen] != 0)
+                    byte[] buf = new byte[capLen + 8];
+                    if (NativeMethods.CapabilitiesRequestAndCapabilitiesReply(rec.PhysicalMonitorHandle, buf, capLen))
                     {
-                        actualLen++;
-                    }
-                    string ascii = Encoding.ASCII.GetString(buf, 0, actualLen);
-                    MonitorCapabilities caps = MccsCapabilitiesParser.Parse(ascii);
-                    rec.Capabilities = caps;
-                    parsedCapsOk = caps.SupportedVcpCodes.Count > 0;
+                        int actualLen = 0;
+                        while (actualLen < buf.Length && buf[actualLen] != 0)
+                        {
+                            actualLen++;
+                        }
+                        string ascii = Encoding.ASCII.GetString(buf, 0, actualLen);
+                        MonitorCapabilities caps = MccsCapabilitiesParser.Parse(ascii);
+                        rec.Capabilities = caps;
+                        parsedCapsOk = caps.SupportedVcpCodes.Count > 0;
 
-                    if (string.IsNullOrEmpty(rec.EdidMonitorName) && !string.IsNullOrEmpty(caps.ModelFromCapabilities))
-                    {
-                        rec.EdidMonitorName = caps.ModelFromCapabilities;
-                    }
+                        if (string.IsNullOrEmpty(rec.EdidMonitorName) && !string.IsNullOrEmpty(caps.ModelFromCapabilities))
+                        {
+                            rec.EdidMonitorName = caps.ModelFromCapabilities;
+                        }
 
-                    rec.SupportsInputSelect = caps.SupportedVcpCodes.Contains(0x60);
-                    rec.SupportsBrightness = caps.SupportedVcpCodes.Contains(0x10);
-                    rec.SupportsVolume = caps.SupportedVcpCodes.Contains(0x62);
-                    rec.SupportsAudioMute = caps.SupportedVcpCodes.Contains(0x8D);
+                        if (caps.SupportedVcpCodes.Contains(0x60))
+                        {
+                            rec.SupportsInputSelect = true;
+                            rec.PreferredInputVcpCode = 0x60;
+                        }
+                        else if (caps.SupportedVcpCodes.Contains(0xF4) &&
+                                 string.Equals(rec.ManufacturerCode, "GSM", StringComparison.OrdinalIgnoreCase))
+                        {
+                            rec.SupportsInputSelect = true;
+                            rec.PreferredInputVcpCode = 0xF4;
+                        }
+
+                        rec.SupportsBrightness = caps.SupportedVcpCodes.Contains(0x10);
+                        rec.SupportsVolume = caps.SupportedVcpCodes.Contains(0x62);
+                        rec.SupportsAudioMute = caps.SupportedVcpCodes.Contains(0x8D);
+                    }
                 }
-            }
-            else
-            {
-                int capErr = Marshal.GetLastWin32Error();
-                if (capErr == NativeMethods.ERROR_GRAPHICS_I2C_NOT_SUPPORTED ||
-                    capErr == NativeMethods.ERROR_GRAPHICS_I2C_DEVICE_DOES_NOT_EXIST)
+                else
                 {
-                    // Internal laptop eDP panel with no DDC/CI bus: skip further I2C timeouts immediately.
-                    return;
+                    int capErr = Marshal.GetLastWin32Error();
+                    if (capErr == NativeMethods.ERROR_GRAPHICS_I2C_NOT_SUPPORTED ||
+                        capErr == NativeMethods.ERROR_GRAPHICS_I2C_DEVICE_DOES_NOT_EXIST)
+                    {
+                        // Internal laptop eDP panel with no DDC/CI bus: skip further I2C timeouts immediately.
+                        return;
+                    }
                 }
-            }
 
-            if (parsedCapsOk)
-            {
-                return;
-            }
-
-            // Fallback direct VCP 0x60 probe when capabilities string is unavailable (ControlMyMonitor LoadingMode 1 -> 2 fallback)
-            uint vcpType, cur, max;
-            if (NativeMethods.GetVCPFeatureAndVCPFeatureReply(rec.PhysicalMonitorHandle, 0x60, out vcpType, out cur, out max))
-            {
-                rec.SupportsInputSelect = true;
-            }
-            else
-            {
-                int err60 = Marshal.GetLastWin32Error();
-                if (err60 == NativeMethods.ERROR_GRAPHICS_I2C_NOT_SUPPORTED ||
-                    err60 == NativeMethods.ERROR_GRAPHICS_I2C_DEVICE_DOES_NOT_EXIST ||
-                    err60 == NativeMethods.ERROR_GRAPHICS_I2C_ERROR_RECEIVING_DATA ||
-                    err60 == NativeMethods.ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA)
+                if (parsedCapsOk && rec.SupportsInputSelect)
                 {
                     return;
                 }
-            }
 
-            uint vt, bCur, bMax;
-            if (NativeMethods.GetVCPFeatureAndVCPFeatureReply(rec.PhysicalMonitorHandle, 0x10, out vt, out bCur, out bMax) && bMax > 0)
-            {
-                rec.SupportsBrightness = true;
-            }
+                // Fallback direct VCP 0x60 probe when capabilities string is unavailable (ControlMyMonitor LoadingMode 1 -> 2 fallback)
+                uint vcpType, cur, max;
+                if (NativeMethods.GetVCPFeatureAndVCPFeatureReply(rec.PhysicalMonitorHandle, 0x60, out vcpType, out cur, out max))
+                {
+                    rec.SupportsInputSelect = true;
+                    rec.PreferredInputVcpCode = 0x60;
+                }
+                else
+                {
+                    int err60 = Marshal.GetLastWin32Error();
+                    if (err60 == NativeMethods.ERROR_GRAPHICS_I2C_NOT_SUPPORTED ||
+                        err60 == NativeMethods.ERROR_GRAPHICS_I2C_DEVICE_DOES_NOT_EXIST ||
+                        err60 == NativeMethods.ERROR_GRAPHICS_I2C_ERROR_RECEIVING_DATA ||
+                        err60 == NativeMethods.ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA)
+                    {
+                        return;
+                    }
 
-            uint vCur, vMax;
-            if (NativeMethods.GetVCPFeatureAndVCPFeatureReply(rec.PhysicalMonitorHandle, 0x62, out vt, out vCur, out vMax) && vMax > 0)
+                    // LG Gen5 vendor VCP 0xF4 fallback if 0x60 returned VCP_NOT_SUPPORTED on GSM hardware
+                    if (string.Equals(rec.ManufacturerCode, "GSM", StringComparison.OrdinalIgnoreCase) &&
+                        NativeMethods.GetVCPFeatureAndVCPFeatureReply(rec.PhysicalMonitorHandle, 0xF4, out vcpType, out cur, out max))
+                    {
+                        rec.SupportsInputSelect = true;
+                        rec.PreferredInputVcpCode = 0xF4;
+                    }
+                }
+
+                if (!parsedCapsOk)
+                {
+                    uint vt, bCur, bMax;
+                    if (NativeMethods.GetVCPFeatureAndVCPFeatureReply(rec.PhysicalMonitorHandle, 0x10, out vt, out bCur, out bMax) && bMax > 0)
+                    {
+                        rec.SupportsBrightness = true;
+                    }
+
+                    uint vCur, vMax;
+                    if (NativeMethods.GetVCPFeatureAndVCPFeatureReply(rec.PhysicalMonitorHandle, 0x62, out vt, out vCur, out vMax) && vMax > 0)
+                    {
+                        rec.SupportsVolume = true;
+                    }
+                }
+            }
+            catch
             {
-                rec.SupportsVolume = true;
             }
         }
 
@@ -404,7 +455,7 @@ namespace DisplayInputSwitcher.Services
 
         private static void DestroySingleHandle(IntPtr hPhysicalMonitor)
         {
-            if (hPhysicalMonitor == IntPtr.Zero) return;
+            if (hPhysicalMonitor == new IntPtr(-1)) return;
             NativeMethods.DestroyPhysicalMonitor(hPhysicalMonitor);
         }
 

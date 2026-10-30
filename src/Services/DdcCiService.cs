@@ -12,12 +12,13 @@ namespace DisplayInputSwitcher.Services
     /// <summary>
     /// Single owning DDC/CI service boundary.
     /// - Serializes all I2C commands with a semaphore so concurrent UI/tray/hotkey calls never collide on the DDC bus.
-    /// - Normalizes VCP 0x60 (Input Select) low byte (& 0xFF) in one place, fixing ControlMyMonitor's /SwitchValue mismatch bug.
+    /// - Normalizes VCP 0x60 / 0xF4 (Input Select) low byte (&amp; 0xFF) in one place, fixing ControlMyMonitor's /SwitchValue mismatch bug.
     /// - Retries transient I2C bus errors with a 60 ms backoff and auto-recovers stale physical monitor handles.
     /// </summary>
     public sealed class DdcCiService : IDisposable
     {
         public const byte VcpInputSelect = 0x60;
+        public const byte VcpLgAltInputSelect = 0xF4;
         public const byte VcpBrightness = 0x10;
         public const byte VcpSpeakerVolume = 0x62;
         public const byte VcpAudioMute = 0x8D;
@@ -67,7 +68,7 @@ namespace DisplayInputSwitcher.Services
                 }
             }
 
-            // Default: pick the first monitor supporting VCP 0x60 Input Select (e.g., LG ULTRAGEAR), else index 0
+            // Default: pick the first monitor supporting Input Select (e.g., LG ULTRAGEAR), else index 0
             for (int i = 0; i < monitors.Count; i++)
             {
                 if (monitors[i].SupportsInputSelect)
@@ -79,28 +80,9 @@ namespace DisplayInputSwitcher.Services
             return monitors[0];
         }
 
-        public Task<DdcResult<VcpFeatureReply>> ReadVcpAsync(
-            string monitorSelector,
-            byte vcpCode,
-            bool useOneByteInputMask,
-            bool retryOnFailure)
-        {
-            return Task.Run(delegate
-            {
-                _busLock.Wait();
-                try
-                {
-                    return ReadVcpSynchronized(monitorSelector, vcpCode, useOneByteInputMask, retryOnFailure);
-                }
-                finally
-                {
-                    _busLock.Release();
-                }
-            });
-        }
-
         public Task<DdcResult<MonitorLiveSnapshot>> ReadLiveSnapshotAsync(
             string monitorSelector,
+            byte? customInputVcpCode,
             bool useOneByteInputMask,
             bool retryOnFailure,
             bool includeQuickControls)
@@ -121,17 +103,25 @@ namespace DisplayInputSwitcher.Services
                             sw.ElapsedMilliseconds);
                     }
 
+                    byte inputVcp = (customInputVcpCode.HasValue && customInputVcpCode.Value != 0)
+                        ? customInputVcpCode.Value
+                        : mon.PreferredInputVcpCode;
+                    if (inputVcp == 0) inputVcp = VcpInputSelect;
+
                     MonitorLiveSnapshot snap = new MonitorLiveSnapshot();
+                    snap.ActiveVcpCode = inputVcp;
                     if (mon.Capabilities != null)
                     {
-                        snap.PossibleInputs = mon.Capabilities.GetInputSelectValues();
+                        List<byte> specific = mon.Capabilities.GetValuesForVcp(inputVcp);
+                        snap.PossibleInputs = specific.Count > 0 ? specific : mon.Capabilities.GetInputSelectValues();
                     }
 
-                    DdcResult<VcpFeatureReply> inRes = ReadVcpOnRecord(mon, VcpInputSelect, useOneByteInputMask, retryOnFailure, true);
+                    DdcResult<VcpFeatureReply> inRes = ReadVcpOnRecord(mon, inputVcp, useOneByteInputMask, retryOnFailure, true);
                     if (inRes.IsSuccess)
                     {
                         snap.CurrentInputValue = inRes.Value.NormalizedCurrentValue;
                         snap.RawInputValue = inRes.Value.RawCurrentValue;
+                        snap.MaxInputValue = inRes.Value.NormalizedMaxValue;
                         mon.SupportsInputSelect = true;
                     }
 
@@ -192,6 +182,7 @@ namespace DisplayInputSwitcher.Services
 
         public Task<DdcResult<uint>> SetInputSourceAsync(
             string monitorSelector,
+            byte inputVcpCode,
             uint targetValue,
             bool useOneByteInputMask,
             bool retryOnFailure)
@@ -201,7 +192,7 @@ namespace DisplayInputSwitcher.Services
                 _busLock.Wait();
                 try
                 {
-                    return SetInputSourceSynchronized(monitorSelector, targetValue, useOneByteInputMask, retryOnFailure);
+                    return SetInputSourceSynchronized(monitorSelector, inputVcpCode, targetValue, useOneByteInputMask, retryOnFailure);
                 }
                 finally
                 {
@@ -212,6 +203,7 @@ namespace DisplayInputSwitcher.Services
 
         public Task<DdcResult<uint>> ToggleInputSourceAsync(
             string monitorSelector,
+            byte inputVcpCode,
             uint hdmiValue,
             uint dpValue,
             uint? lastKnownInput,
@@ -223,7 +215,8 @@ namespace DisplayInputSwitcher.Services
                 _busLock.Wait();
                 try
                 {
-                    DdcResult<VcpFeatureReply> cur = ReadVcpSynchronized(monitorSelector, VcpInputSelect, useOneByteInputMask, retryOnFailure);
+                    byte vcp = inputVcpCode != 0 ? inputVcpCode : VcpInputSelect;
+                    DdcResult<VcpFeatureReply> cur = ReadVcpSynchronized(monitorSelector, vcp, useOneByteInputMask, retryOnFailure);
                     uint activeVal;
                     if (cur.IsSuccess)
                     {
@@ -239,7 +232,7 @@ namespace DisplayInputSwitcher.Services
                     }
 
                     uint nextTarget = (activeVal == hdmiValue) ? dpValue : hdmiValue;
-                    return SetInputSourceSynchronized(monitorSelector, nextTarget, useOneByteInputMask, retryOnFailure);
+                    return SetInputSourceSynchronized(monitorSelector, vcp, nextTarget, useOneByteInputMask, retryOnFailure);
                 }
                 finally
                 {
@@ -283,6 +276,7 @@ namespace DisplayInputSwitcher.Services
 
         private DdcResult<uint> SetInputSourceSynchronized(
             string monitorSelector,
+            byte inputVcpCode,
             uint targetValue,
             bool useOneByteInputMask,
             bool retryOnFailure)
@@ -294,13 +288,16 @@ namespace DisplayInputSwitcher.Services
                 return DdcResult<uint>.Fail(DdcErrorKind.MonitorNotFound, 0, "No DDC/CI monitor available.", sw.ElapsedMilliseconds);
             }
 
-            DdcResult<bool> writeRes = WriteVcpOnRecord(mon, VcpInputSelect, targetValue, retryOnFailure, true);
+            byte vcp = inputVcpCode != 0 ? inputVcpCode : mon.PreferredInputVcpCode;
+            if (vcp == 0) vcp = VcpInputSelect;
+
+            DdcResult<bool> writeRes = WriteVcpOnRecord(mon, vcp, targetValue, retryOnFailure, true);
             if (!writeRes.IsSuccess)
             {
                 // Note: Some LG/DisplayPort scalers drop I2C ACK mid-switch right as they transition inputs.
                 // Wait briefly and check if the read confirms the switch, otherwise report the error clearly.
                 Thread.Sleep(140);
-                DdcResult<VcpFeatureReply> checkAfterErr = ReadVcpOnRecord(mon, VcpInputSelect, useOneByteInputMask, false, false);
+                DdcResult<VcpFeatureReply> checkAfterErr = ReadVcpOnRecord(mon, vcp, useOneByteInputMask, false, false);
                 sw.Stop();
                 if (checkAfterErr.IsSuccess && checkAfterErr.Value.NormalizedCurrentValue == targetValue)
                 {
@@ -310,8 +307,9 @@ namespace DisplayInputSwitcher.Services
             }
 
             // Give the monitor scaler ~150 ms to settle before non-fatal confirmation read.
+            // When switching AWAY to another physical port, the monitor may detach DDC/CI on this cable immediately after accepting SetVCPFeature.
             Thread.Sleep(150);
-            DdcResult<VcpFeatureReply> confirm = ReadVcpOnRecord(mon, VcpInputSelect, useOneByteInputMask, false, false);
+            DdcResult<VcpFeatureReply> confirm = ReadVcpOnRecord(mon, vcp, useOneByteInputMask, false, false);
             sw.Stop();
 
             if (confirm.IsSuccess)
@@ -319,7 +317,6 @@ namespace DisplayInputSwitcher.Services
                 return DdcResult<uint>.Ok(confirm.Value.NormalizedCurrentValue, sw.ElapsedMilliseconds);
             }
 
-            // When switching AWAY to another physical port, the monitor may detach DDC/CI on this cable immediately after accepting SetVCPFeature.
             return DdcResult<uint>.Ok(targetValue, sw.ElapsedMilliseconds);
         }
 
@@ -357,7 +354,19 @@ namespace DisplayInputSwitcher.Services
                 }
 
                 uint vcpType, rawCur, rawMax;
-                if (NativeMethods.GetVCPFeatureAndVCPFeatureReply(mon.PhysicalMonitorHandle, vcpCode, out vcpType, out rawCur, out rawMax))
+                bool ok = false;
+                try
+                {
+                    ok = NativeMethods.GetVCPFeatureAndVCPFeatureReply(mon.PhysicalMonitorHandle, vcpCode, out vcpType, out rawCur, out rawMax);
+                }
+                catch
+                {
+                    vcpType = 0; rawCur = 0; rawMax = 0;
+                    lastErr = NativeMethods.ERROR_GRAPHICS_I2C_NOT_SUPPORTED;
+                    break;
+                }
+
+                if (ok)
                 {
                     sw.Stop();
                     VcpFeatureReply reply = NormalizeVcpReply(vcpCode, vcpType, rawCur, rawMax, useOneByteInputMask);
@@ -407,7 +416,18 @@ namespace DisplayInputSwitcher.Services
                     Thread.Sleep(65);
                 }
 
-                if (NativeMethods.SetVCPFeature(mon.PhysicalMonitorHandle, vcpCode, newValue))
+                bool ok = false;
+                try
+                {
+                    ok = NativeMethods.SetVCPFeature(mon.PhysicalMonitorHandle, vcpCode, newValue);
+                }
+                catch
+                {
+                    lastErr = NativeMethods.ERROR_GRAPHICS_I2C_NOT_SUPPORTED;
+                    break;
+                }
+
+                if (ok)
                 {
                     sw.Stop();
                     return DdcResult<bool>.Ok(true, sw.ElapsedMilliseconds);
@@ -449,7 +469,7 @@ namespace DisplayInputSwitcher.Services
             r.RawCurrentValue = rawCurrent;
             r.RawMaxValue = rawMax;
 
-            if (vcpCode == VcpInputSelect && useOneByteInputMask)
+            if ((vcpCode == VcpInputSelect || vcpCode == VcpLgAltInputSelect) && useOneByteInputMask)
             {
                 r.NormalizedCurrentValue = rawCurrent & 0xFFu;
                 r.NormalizedMaxValue = rawMax & 0xFFu;
@@ -486,4 +506,3 @@ namespace DisplayInputSwitcher.Services
         }
     }
 }
-
